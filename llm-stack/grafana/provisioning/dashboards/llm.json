@@ -1,0 +1,19 @@
+{
+  "title": "LLM Metrics",
+  "panels": [
+    {
+      "type": "graph",
+      "title": "Requests Total",
+      "targets": [
+        { "expr": "llm_requests_total" }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Tokens Streamed",
+      "targets": [
+        { "expr": "llm_tokens_streamed_total" }
+      ]
+    }
+  ]
+}

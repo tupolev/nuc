@@ -1,0 +1,16 @@
+nuc.fritz.box {
+
+    tls /certs/fullchain.pem /certs/nuc.fritz.box-key.pem
+
+    handle /v1/* {
+        reverse_proxy ollama-adapter:4000
+    }
+
+    handle /metrics {
+        reverse_proxy ollama-adapter:4000
+    }
+
+    handle {
+        reverse_proxy open-webui:8080
+    }
+}

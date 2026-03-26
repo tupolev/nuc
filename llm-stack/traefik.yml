@@ -1,0 +1,5 @@
+tls:
+  certificates:
+    - certFile: /certs/nuc.fritz.box.pem
+      keyFile: /certs/nuc.fritz.box-key.pem
+

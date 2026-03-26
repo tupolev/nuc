@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+
+  - job_name: llm-adapter
+    metrics_path: /metrics/prometheus
+    static_configs:
+      - targets: ["ollama-adapter:4000"]
+
+  - job_name: ollama
+    static_configs:
+      - targets: ["ollama-exporter:9101"]
+
+  - job_name: node
+    static_configs:
+      - targets: ["host.docker.internal:9100"]
