@@ -281,3 +281,28 @@ async def embeddings(request: Request, req: dict):
     finally:
         embed_active -= 1
         METRICS["embed_active"] = embed_active
+
+# =========================
+# MODELS
+# =========================
+
+@app.get("/v1/models")
+async def models():
+
+    async with httpx.AsyncClient() as client:
+        r = await client.get(f"{OLLAMA_URL}/api/tags")
+
+    models = r.json().get("models", [])
+
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": m["name"],
+                "object": "model",
+                "created": 0,
+                "owned_by": "ollama"
+            }
+            for m in models
+        ]
+    }
