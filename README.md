@@ -1,18 +1,21 @@
-# 🧠 Local LLM Stack (Ollama + Adapter + Prometheus + Grafana)
+# 🧠 Local LLM Stack (Ollama + Adapter + Caddy + Prometheus + Grafana)
 
 A fully local, production-style LLM serving stack with:
 
-* OpenAI-compatible API
+* OpenAI-compatible API (✅ streaming + SSE fixed)
 * Priority-based scheduler
+* Reverse proxy with TLS (Caddy)
 * Observability (Prometheus + Grafana)
 * SQLite-based API key management
+* Automatic Ollama warmup on boot
 
 ---
 
 # 🚀 Architecture
 
 ```
-Client → Adapter (FastAPI)
+Client → Caddy (TLS + routing)
+        → Adapter (FastAPI, OpenAI-compatible)
         → Scheduler (priority + queues)
         → Ollama (LLM)
 
@@ -25,6 +28,7 @@ Metrics → Prometheus → Grafana
 
 * **Ollama** → runs LLM models locally
 * **Adapter (FastAPI)** → OpenAI-compatible API + scheduler
+* **Caddy** → reverse proxy + HTTPS (mkcert or real certs)
 * **Prometheus** → metrics scraping
 * **Grafana** → visualization dashboards
 * **SQLite (`auth.db`)** → API keys + priorities
@@ -39,12 +43,13 @@ Metrics → Prometheus → Grafana
   * chat
   * embeddings
 * Concurrency control
-* Streaming (SSE)
+* ✅ OpenAI-compatible streaming (SSE fixed)
 * Request cancellation
 * Queue timeout
 * Prometheus metrics (p95 latency)
 * Grafana dashboards (auto-provisioned)
-* No hardcoded secrets
+* TLS via Caddy
+* Works with OpenWebUI / SDKs / curl
 
 ---
 
@@ -53,20 +58,18 @@ Metrics → Prometheus → Grafana
 ```
 llm-stack/
 ├── docker-compose.yml
+├── Caddyfile
 ├── adapter/
 │   ├── app.py
 │   └── Dockerfile
 ├── data/
 │   └── auth.db
+├── certs/
+│   └── (mkcert or real certs)
 ├── prometheus/
 │   └── prometheus.yml
 ├── grafana/
 │   └── provisioning/
-│       ├── datasources/
-│       │   └── datasource.yml
-│       └── dashboards/
-│           ├── dashboard.yml
-│           └── llm.json
 ```
 
 ---
@@ -74,40 +77,40 @@ llm-stack/
 # 🚀 Quick Start
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
 ---
 
 # 🌐 Endpoints
 
+### Local
+
 * API → http://localhost:4000
+* OpenWebUI → http://localhost:8080
 * Prometheus → http://localhost:9090
 * Grafana → http://localhost:3001
+
+### Via Caddy (recommended)
+
+* API → https://nuc/v1/*
+* UI → https://nuc
 
 ---
 
 # 🔐 API Keys (SQLite)
-
-## 1. Create database
 
 ```bash
 mkdir -p data
 sqlite3 data/auth.db
 ```
 
-## 2. Create table
-
 ```sql
 CREATE TABLE api_keys (
   key TEXT PRIMARY KEY,
   priority TEXT
 );
-```
 
-## 3. Insert keys
-
-```sql
 INSERT INTO api_keys VALUES ('test123', 'medium');
 INSERT INTO api_keys VALUES ('admin123', 'high');
 INSERT INTO api_keys VALUES ('batch123', 'low');
@@ -116,7 +119,6 @@ INSERT INTO api_keys VALUES ('batch123', 'low');
 ---
 
 # 🧠 Priority Levels
-
 
 | Level  | Value | Use case         |
 | ------ | ----- | ---------------- |
@@ -128,23 +130,16 @@ INSERT INTO api_keys VALUES ('batch123', 'low');
 
 # 📡 API Usage
 
-## Chat
+## Chat (OpenAI-compatible)
 
 ```bash
-curl http://localhost:4000/v1/chat/completions \
+curl https://nuc/v1/chat/completions \
 -H "Authorization: Bearer test123" \
 -H "Content-Type: application/json" \
 -d '{
+  "model": "qwen2.5-coder:7b",
   "messages":[{"role":"user","content":"Hello"}]
 }'
-```
-
----
-
-## Priority Override
-
-```bash
--H "X-Priority: high"
 ```
 
 ---
@@ -152,165 +147,74 @@ curl http://localhost:4000/v1/chat/completions \
 ## Embeddings
 
 ```bash
-curl http://localhost:4000/v1/embeddings \
+curl https://nuc/v1/embeddings \
 -H "Authorization: Bearer batch123" \
 -H "Content-Type: application/json" \
--d '{
-  "input": "hello world"
-}'
+-d '{"input":"hello world"}'
+```
+
+---
+
+# 🔥 Caddy Configuration
+
+`Caddyfile`:
+
+```caddy
+nuc {
+
+    tls /certs/fullchain.pem /certs/nuc-key.pem
+
+    handle /v1/* {
+        reverse_proxy adapter:4000 {
+            transport http {
+                versions 1.1
+            }
+        }
+    }
+
+    handle /metrics {
+        reverse_proxy adapter:4000
+    }
+
+    handle {
+        reverse_proxy open-webui:8080
+    }
+}
+```
+
+---
+
+# 🔐 TLS Certificates (mkcert)
+
+```bash
+mkcert -install
+mkcert nuc
+```
+
+Move files to:
+
+```
+certs/
 ```
 
 ---
 
 # 📊 Metrics
 
-## JSON endpoint
-
 ```bash
 curl http://localhost:4000/metrics
-```
-
-Includes:
-
-* wait_p95
-* latency_p95
-* tokens_streamed
-* queue sizes
-
----
-
-## Prometheus endpoint
-
-```bash
 curl http://localhost:4000/metrics/prometheus
 ```
 
-Example metrics:
-
-```
-llm_requests_total
-llm_tokens_streamed_total
-llm_wait_p95
-llm_latency_p95
-```
-
 ---
 
-# 📈 Grafana Provisioning (Step-by-Step)
+# 🐧 Systemd Services (FULL SETUP)
 
-## 1. Datasource
-
-Create:
-
-`grafana/provisioning/datasources/datasource.yml`
-
-```yaml
-apiVersion: 1
-
-datasources:
-  - name: Prometheus
-    type: prometheus
-    access: proxy
-    url: http://prometheus:9090
-```
-
----
-
-## 2. Dashboard provider
-
-Create:
-
-`grafana/provisioning/dashboards/dashboard.yml`
-
-```yaml
-apiVersion: 1
-
-providers:
-  - name: default
-    folder: ""
-    type: file
-    options:
-      path: /etc/grafana/provisioning/dashboards
-```
-
----
-
-## 3. Dashboard definition
-
-Create:
-
-`grafana/provisioning/dashboards/llm.json`
-
-```json
-{
-  "title": "LLM Metrics",
-  "panels": [
-    {
-      "type": "graph",
-      "title": "Requests Total",
-      "targets": [
-        { "expr": "llm_requests_total" }
-      ]
-    },
-    {
-      "type": "graph",
-      "title": "Tokens Streamed",
-      "targets": [
-        { "expr": "llm_tokens_streamed_total" }
-      ]
-    }
-  ]
-}
-```
-
----
-
-## 4. Restart Grafana
-
-```bash
-docker compose restart grafana
-```
-
----
-
-# 🧪 Concurrency Test
-
-```bash
-(
-curl ... low &
-curl ... low &
-curl ... low &
-
-sleep 3
-
-curl ... high &
-
-wait
-)
-```
-
----
-
-# 🧠 Scheduler Behavior
-
-* Non-preemptive (like OpenAI / vLLM)
-* Priority applied at queue level
-* FIFO within same priority
-* Chat and embeddings isolated
-
----
-
-# 🐧 Run on Linux Startup (systemd)
-
-## 1. Create service file
+## 1️⃣ LLM Stack (Docker Compose)
 
 ```bash
 sudo nano /etc/systemd/system/llm-stack.service
 ```
-
----
-
-## 2. Add content
 
 ```ini
 [Unit]
@@ -331,59 +235,97 @@ WantedBy=multi-user.target
 
 ---
 
-## 3. Enable service
+## 2️⃣ Ollama Warmup Script
+
+Script (`warm-ollama.sh` already exists)
+
+---
+
+## 3️⃣ Wrapper Script
+
+```bash
+nano /usr/local/bin/warm-ollama-wrapper.sh
+```
+
+```bash
+#!/bin/bash
+
+echo "Waiting for Ollama..."
+
+until curl -s http://localhost:11434/api/tags > /dev/null; do
+  sleep 2
+done
+
+echo "Ollama ready. Warming up..."
+
+/path/to/warm-ollama.sh
+```
+
+```bash
+chmod +x /usr/local/bin/warm-ollama-wrapper.sh
+```
+
+---
+
+## 4️⃣ systemd Warmup Service
+
+```bash
+sudo nano /etc/systemd/system/ollama-warmup.service
+```
+
+```ini
+[Unit]
+Description=Warm up Ollama models
+After=network.target docker.service llm-stack.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/warm-ollama-wrapper.sh
+
+[Install]
+WantedBy=multi-user.target
+```
+
+---
+
+## 5️⃣ Enable Everything
 
 ```bash
 sudo systemctl daemon-reexec
 sudo systemctl daemon-reload
+
 sudo systemctl enable llm-stack
+sudo systemctl enable ollama-warmup
+
 sudo systemctl start llm-stack
+sudo systemctl start ollama-warmup
 ```
 
 ---
 
-## 4. Check status
+## 6️⃣ Debug
 
 ```bash
-systemctl status llm-stack
+journalctl -u ollama-warmup.service -f
+docker logs llm-stack-adapter-1 -f
 ```
 
 ---
 
-# ⚠️ Current Limitations
+# 🧪 Testing
 
-* No rate limiting per API key
-* No fairness / anti-starvation
-* Single-node Ollama
-* Basic dashboards only
-
----
-
-# 🚀 Possible Improvements
-
-* Rate limiting per API key
-* Multi-node Ollama (load balancing)
-* Advanced dashboards
-* Admin API for key management
-* Usage tracking per user
+```bash
+curl https://nuc/v1/chat/completions ...
+```
 
 ---
 
 # 🏁 Status
 
 ```
-✔ Production-ready local LLM stack
-✔ Priority scheduler
-✔ Observability included
-✔ Fully reproducible
+✔ Fully working OpenAI-compatible local API
+✔ Streaming + WebUI working
+✔ TLS + reverse proxy
+✔ Observability stack
+✔ Auto warmup on boot
 ```
-
----
-
-# 🧑‍💻 Notes
-
-This stack is designed for:
-
-* Local development
-* Private AI infrastructure
-* Controlled LLM serving environments
