@@ -6,6 +6,8 @@ import asyncio
 import time
 import heapq
 import sqlite3
+import uuid
+import os
 
 app = FastAPI()
 
@@ -21,6 +23,7 @@ PRIORITY_MAP = {"high": 0, "medium": 1, "low": 2}
 # =========================
 # DB
 # =========================
+os.makedirs("/data", exist_ok=True)
 conn = sqlite3.connect("/data/auth.db", check_same_thread=False)
 
 def get_api_key_priority(token):
@@ -69,7 +72,6 @@ def percentile(data, p):
     return data[min(k, len(data)-1)]
 
 def get_priority(request: Request, api_key: str):
-
     header = request.headers.get("X-Priority")
     if header in PRIORITY_MAP:
         return PRIORITY_MAP[header]
@@ -188,7 +190,7 @@ llm_latency_p95 {percentile(METRICS['latency'],95)}
 """, media_type="text/plain")
 
 # =========================
-# CHAT
+# CHAT (SSE CORRECTO)
 # =========================
 @app.post("/v1/chat/completions")
 async def chat(request: Request, req: dict):
@@ -235,14 +237,44 @@ async def chat(request: Request, req: dict):
                         if not line:
                             continue
 
-                        data = json.loads(line)
+                        try:
+                            data = json.loads(line)
+                        except:
+                            continue
+
                         token = data.get("message", {}).get("content")
 
                         if token:
                             METRICS["tokens_streamed"] += 1
-                            yield f"data: {json.dumps({'choices':[{'delta':{'content':token}}]})}\n\n"
+
+                            chunk = {
+                                "id": f"chatcmpl-{uuid.uuid4().hex}",
+                                "object": "chat.completion.chunk",
+                                "choices": [
+                                    {
+                                        "delta": {"content": token},
+                                        "index": 0,
+                                        "finish_reason": None
+                                    }
+                                ]
+                            }
+
+                            yield "data: " + json.dumps(chunk) + "\n\n"
 
                         if data.get("done"):
+                            final_chunk = {
+                                "id": f"chatcmpl-{uuid.uuid4().hex}",
+                                "object": "chat.completion.chunk",
+                                "choices": [
+                                    {
+                                        "delta": {},
+                                        "index": 0,
+                                        "finish_reason": "stop"
+                                    }
+                                ]
+                            }
+
+                            yield "data: " + json.dumps(final_chunk) + "\n\n"
                             break
 
             yield "data: [DONE]\n\n"
@@ -252,7 +284,14 @@ async def chat(request: Request, req: dict):
             METRICS["chat_active"] = chat_active
             METRICS["latency"].append(time.time() - start_time)
 
-    return StreamingResponse(generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
 
 # =========================
 # EMBEDDINGS
@@ -285,7 +324,6 @@ async def embeddings(request: Request, req: dict):
 # =========================
 # MODELS
 # =========================
-
 @app.get("/v1/models")
 async def models():
 
@@ -306,3 +344,10 @@ async def models():
             for m in models
         ]
     }
+
+# =========================
+# HEALTH
+# =========================
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
