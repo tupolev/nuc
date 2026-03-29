@@ -8,6 +8,7 @@ import heapq
 import sqlite3
 import uuid
 import os
+import subprocess
 
 app = FastAPI()
 
@@ -15,7 +16,6 @@ OLLAMA_URL = "http://host.docker.internal:11434"
 
 CHAT_CONCURRENCY = 2
 EMBED_CONCURRENCY = 1
-
 QUEUE_TIMEOUT = 30
 
 PRIORITY_MAP = {"high": 0, "medium": 1, "low": 2}
@@ -62,6 +62,69 @@ METRICS = {
 }
 
 # =========================
+# TOOLS
+# =========================
+async def run_tool(name, args):
+    if name == "web_search":
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                "https://duckduckgo.com/html/",
+                params={"q": args.get("query")}
+            )
+        return {"result": r.text[:2000]}
+
+    if name == "python":
+        result = subprocess.run(
+            ["python3", "-c", args.get("code", "")],
+            capture_output=True,
+            text=True
+        )
+        return {"stdout": result.stdout, "stderr": result.stderr}
+
+    return {"error": "tool not found"}
+
+# =========================
+# TOOL LOOP
+# =========================
+async def run_with_tools(messages, model):
+    async with httpx.AsyncClient(timeout=None) as client:
+        for _ in range(5):
+            r = await client.post(
+                f"{OLLAMA_URL}/api/chat",
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "stream": False
+                }
+            )
+
+            data = r.json()
+            content = data["message"]["content"]
+
+            try:
+                parsed = json.loads(content)
+                if "tool_calls" not in parsed:
+                    return content
+                tool_calls = parsed["tool_calls"]
+            except:
+                return content
+
+            for call in tool_calls:
+                result = await run_tool(call.get("name"), call.get("arguments", {}))
+
+                messages.append({
+                    "role": "assistant",
+                    "content": json.dumps(call)
+                })
+
+                messages.append({
+                    "role": "tool",
+                    "content": json.dumps(result)
+                })
+
+        return "Max tool iterations reached"
+
+# =========================
 # UTILS
 # =========================
 def percentile(data, p):
@@ -87,9 +150,7 @@ def get_priority(request: Request, api_key: str):
 # =========================
 @app.middleware("http")
 async def auth(request: Request, call_next):
-
     if request.url.path.startswith("/v1"):
-
         auth = request.headers.get("Authorization")
 
         if not auth or not auth.startswith("Bearer "):
@@ -108,7 +169,6 @@ async def auth(request: Request, call_next):
 # QUEUE
 # =========================
 async def enqueue(queue, lock, priority):
-
     global counter
 
     future = asyncio.get_event_loop().create_future()
@@ -126,15 +186,13 @@ async def enqueue(queue, lock, priority):
 # =========================
 async def chat_scheduler():
     global chat_active
-
     while True:
         await asyncio.sleep(0.001)
-
         async with chat_lock:
             if not chat_queue or chat_active >= CHAT_CONCURRENCY:
                 continue
 
-            priority, cnt, future = heapq.heappop(chat_queue)
+            _, _, future = heapq.heappop(chat_queue)
 
             if not future.done():
                 chat_active += 1
@@ -145,15 +203,13 @@ async def chat_scheduler():
 
 async def embed_scheduler():
     global embed_active
-
     while True:
         await asyncio.sleep(0.001)
-
         async with embed_lock:
             if not embed_queue or embed_active >= EMBED_CONCURRENCY:
                 continue
 
-            priority, cnt, future = heapq.heappop(embed_queue)
+            _, _, future = heapq.heappop(embed_queue)
 
             if not future.done():
                 embed_active += 1
@@ -168,29 +224,7 @@ async def startup():
     asyncio.create_task(embed_scheduler())
 
 # =========================
-# METRICS
-# =========================
-@app.get("/metrics")
-async def metrics():
-    return {
-        **METRICS,
-        "wait_p95": percentile(METRICS["wait_time"], 95),
-        "latency_p95": percentile(METRICS["latency"], 95),
-    }
-
-@app.get("/metrics/prometheus")
-async def metrics_prom():
-    return Response(f"""
-llm_requests_total {METRICS['requests_total']}
-llm_chat_active {METRICS['chat_active']}
-llm_embed_active {METRICS['embed_active']}
-llm_tokens_streamed_total {METRICS['tokens_streamed']}
-llm_wait_p95 {percentile(METRICS['wait_time'],95)}
-llm_latency_p95 {percentile(METRICS['latency'],95)}
-""", media_type="text/plain")
-
-# =========================
-# CHAT (SSE CORRECTO)
+# CHAT
 # =========================
 @app.post("/v1/chat/completions")
 async def chat(request: Request, req: dict):
@@ -215,25 +249,43 @@ async def chat(request: Request, req: dict):
 
     model = req.get("model", "qwen2.5-coder:7b")
     messages = req.get("messages", [])
+    use_tools = bool(req.get("tools"))
 
     start_time = time.time()
 
-    async def generator():
-        global chat_active
+    try:
+        if use_tools:
+            result = await run_with_tools(messages, model)
 
-        try:
-            async with httpx.AsyncClient(timeout=None) as client:
-                async with client.stream(
-                    "POST",
-                    f"{OLLAMA_URL}/api/chat",
-                    json={"model": model, "messages": messages, "stream": True}
-                ) as r:
+            return JSONResponse({
+                "id": f"chatcmpl-{uuid.uuid4().hex}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": result
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0
+                }
+            })
 
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream(
+                "POST",
+                f"{OLLAMA_URL}/api/chat",
+                json={"model": model, "messages": messages, "stream": True}
+            ) as r:
+
+                async def generator():
                     async for line in r.aiter_lines():
-
-                        if await request.is_disconnected():
-                            break
-
                         if not line:
                             continue
 
@@ -250,104 +302,60 @@ async def chat(request: Request, req: dict):
                             chunk = {
                                 "id": f"chatcmpl-{uuid.uuid4().hex}",
                                 "object": "chat.completion.chunk",
-                                "choices": [
-                                    {
-                                        "delta": {"content": token},
-                                        "index": 0,
-                                        "finish_reason": None
-                                    }
-                                ]
+                                "choices": [{
+                                    "delta": {"content": token},
+                                    "index": 0,
+                                    "finish_reason": None
+                                }]
                             }
 
                             yield "data: " + json.dumps(chunk) + "\n\n"
 
                         if data.get("done"):
-                            final_chunk = {
-                                "id": f"chatcmpl-{uuid.uuid4().hex}",
-                                "object": "chat.completion.chunk",
-                                "choices": [
-                                    {
-                                        "delta": {},
-                                        "index": 0,
-                                        "finish_reason": "stop"
-                                    }
-                                ]
-                            }
-
-                            yield "data: " + json.dumps(final_chunk) + "\n\n"
+                            yield "data: [DONE]\n\n"
                             break
 
-            yield "data: [DONE]\n\n"
+                return StreamingResponse(generator(), media_type="text/event-stream")
 
-        finally:
-            chat_active -= 1
-            METRICS["chat_active"] = chat_active
-            METRICS["latency"].append(time.time() - start_time)
+    finally:
+        chat_active -= 1
+        METRICS["chat_active"] = chat_active
+        METRICS["latency"].append(time.time() - start_time)
 
-    return StreamingResponse(
-        generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        },
+# =========================
+# METRICS
+# =========================
+@app.get("/metrics/prometheus")
+async def metrics_prom():
+    return Response(
+        f"""llm_requests_total {METRICS['requests_total']}
+llm_chat_active {METRICS['chat_active']}
+llm_embed_active {METRICS['embed_active']}
+llm_tokens_streamed_total {METRICS['tokens_streamed']}
+llm_wait_p95 {percentile(METRICS['wait_time'], 95)}
+llm_latency_p95 {percentile(METRICS['latency'], 95)}
+""",
+        media_type="text/plain"
     )
 
 # =========================
-# EMBEDDINGS
+# OPENAPI
 # =========================
-@app.post("/v1/embeddings")
-async def embeddings(request: Request, req: dict):
-
-    global embed_active
-
-    api_key = request.state.api_key
-    priority = get_priority(request, api_key)
-
-    item = await enqueue(embed_queue, embed_lock, priority)
-
-    try:
-        await asyncio.wait_for(item[2], timeout=QUEUE_TIMEOUT)
-    except:
-        METRICS["errors"] += 1
-        return JSONResponse(status_code=429, content={"error": "queue timeout"})
-
-    try:
-        async with httpx.AsyncClient(timeout=None) as client:
-            r = await client.post(f"{OLLAMA_URL}/api/embeddings", json=req)
-        return r.json()
-
-    finally:
-        embed_active -= 1
-        METRICS["embed_active"] = embed_active
-
-# =========================
-# MODELS
-# =========================
-@app.get("/v1/models")
-async def models():
-
-    async with httpx.AsyncClient() as client:
-        r = await client.get(f"{OLLAMA_URL}/api/tags")
-
-    models = r.json().get("models", [])
-
+@app.get("/v1/openapi.json")
+async def openapi_spec():
     return {
-        "object": "list",
-        "data": [
-            {
-                "id": m["name"],
-                "object": "model",
-                "created": 0,
-                "owned_by": "ollama"
+        "openapi": "3.0.0",
+        "info": {"title": "LLM Tools API", "version": "1.0.0"},
+        "paths": {
+            "/v1/tools/web_search": {
+                "post": {
+                    "operationId": "web_search"
+                }
+            },
+            "/v1/tools/python": {
+                "post": {
+                    "operationId": "python"
+                }
             }
-            for m in models
-        ]
+        }
     }
-
-# =========================
-# HEALTH
-# =========================
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
