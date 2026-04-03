@@ -1,102 +1,92 @@
-# 🧠 Local LLM Stack (Ollama + Adapter + Prometheus + Grafana)
+# Local LLM Stack
 
-A fully local, production-style LLM serving stack with:
+Stack local con:
 
-* OpenAI-compatible API
-* Priority-based scheduler
-* Observability (Prometheus + Grafana)
-* SQLite-based API key management
+- Ollama en el host
+- Adapter FastAPI con API tipo OpenAI
+- Open WebUI detrás de Caddy
+- Prometheus + Grafana
+- SQLite para API keys y prioridades
 
----
+## Arquitectura
 
-# 🚀 Architecture
+```text
+Cliente
+  -> Caddy (https://nuc.fritz.box)
+    -> /v1/* -> adapter:4000
+    -> /metrics -> adapter:4000
+    -> /metrics/* -> adapter:4000
+    -> /* -> open-webui:8080
 
-```
-Client → Adapter (FastAPI)
-        → Scheduler (priority + queues)
-        → Ollama (LLM)
+adapter
+  -> Ollama en host.docker.internal:11434
+  -> /data/auth.db
+  -> /data/files
 
-Metrics → Prometheus → Grafana
-```
-
----
-
-# 🧩 Components
-
-* **Ollama** → runs LLM models locally
-* **Adapter (FastAPI)** → OpenAI-compatible API + scheduler
-* **Prometheus** → metrics scraping
-* **Grafana** → visualization dashboards
-* **SQLite (`auth.db`)** → API keys + priorities
-
----
-
-# ⚙️ Features
-
-* Priority queue (high / medium / low)
-* Separate queues:
-
-  * chat
-  * embeddings
-* Concurrency control
-* Streaming (SSE)
-* Request cancellation
-* Queue timeout
-* Prometheus metrics (p95 latency)
-* Grafana dashboards (auto-provisioned)
-* No hardcoded secrets
-
----
-
-# 📁 Project Structure
-
-```
-llm-stack/
-├── docker-compose.yml
-├── adapter/
-│   ├── app.py
-│   └── Dockerfile
-├── data/
-│   └── auth.db
-├── prometheus/
-│   └── prometheus.yml
-├── grafana/
-│   └── provisioning/
-│       ├── datasources/
-│       │   └── datasource.yml
-│       └── dashboards/
-│           ├── dashboard.yml
-│           └── llm.json
+Prometheus
+  -> scrape adapter:4000/metrics/prometheus
+  -> scrape ollama-exporter:9101
+  -> scrape host.docker.internal:9100
 ```
 
----
+## Endpoints útiles
 
-# 🚀 Quick Start
+- API OpenAI-compatible directa: `http://localhost:4000`
+- API OpenAI-compatible vía Caddy: `https://nuc.fritz.box/v1/...`
+- Open WebUI: `https://nuc.fritz.box/`
+- Métricas JSON del adapter: `https://nuc.fritz.box/metrics`
+- Métricas Prometheus del adapter: `https://nuc.fritz.box/metrics/prometheus`
+- Prometheus UI: `http://localhost:9090`
+- Grafana: `http://localhost:3001`
 
-```bash
-docker compose up -d
-```
+## Funcionalidad actual del adapter
 
----
+- `POST /v1/chat/completions`
+- `POST /v1/embeddings`
+- `GET /v1/models`
+- `GET /v1/tools`
+- `POST /v1/tools/web_search`
+- `POST /v1/tools/python`
+- `POST /v1/tools/save_file`
+- `GET /v1/openapi.json`
+- `GET /metrics`
+- `GET /metrics/prometheus`
 
-# 🌐 Endpoints
+Además soporta:
 
-* API → http://localhost:4000
-* Prometheus → http://localhost:9090
-* Grafana → http://localhost:3001
+- Streaming SSE en chat
+- Colas con prioridad `high` / `medium` / `low`
+- Modo tools `server`
+- Modo tools `client`
+- Traducción de `tool_calls` entre formato OpenAI y Ollama
+- Métricas de latencia, colas, streaming y tools
 
----
+## Variables del adapter
 
-# 🔐 API Keys (SQLite)
+El adapter lee estas variables:
 
-## 1. Create database
+- `OLLAMA_URL`
+- `FILES_DIR`
+- `AUTH_DB_PATH`
+- `CHAT_CONCURRENCY`
+- `EMBED_CONCURRENCY`
+- `QUEUE_TIMEOUT`
+- `TOOL_MAX_ITERATIONS`
+- `TOOL_ARG_MAX_LEN`
+- `TOOL_OUTPUT_MAX_LEN`
+- `PYTHON_TIMEOUT`
+- `PYTHON_CODE_MAX_LEN`
+- `DEFAULT_MODEL`
+- `TOOL_EXECUTION_MODE`
+- `AUTO_ENABLE_LOCAL_TOOLS`
 
-```bash
-mkdir -p data
-sqlite3 data/auth.db
-```
+Hay una plantilla en [.env.example](/home/tupolev/llm-stack/.env.example).
 
-## 2. Create table
+## API keys
+
+Base de datos: `data/auth.db`
+
+Tabla:
 
 ```sql
 CREATE TABLE api_keys (
@@ -105,7 +95,7 @@ CREATE TABLE api_keys (
 );
 ```
 
-## 3. Insert keys
+Ejemplos:
 
 ```sql
 INSERT INTO api_keys VALUES ('maravillas123', 'medium');
@@ -113,276 +103,140 @@ INSERT INTO api_keys VALUES ('admin123', 'high');
 INSERT INTO api_keys VALUES ('batch123', 'low');
 ```
 
----
+## Uso rápido
 
-# 🧠 Priority Levels
+Levantar toda la pila:
 
-| Level  | Value | Use case         |
-| ------ | ----- | ---------------- |
-| high   | 0     | UI / interactive |
-| medium | 1     | normal usage     |
-| low    | 2     | batch jobs       |
+```bash
+docker compose up -d
+```
 
----
+Reconstruir solo el adapter cuando cambie `adapter/app.py`:
 
-# 📡 API Usage
+```bash
+docker compose build adapter
+docker compose up -d adapter
+```
 
-## Chat
+Recargar Caddy cuando cambie `Caddyfile`:
+
+```bash
+docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
+```
+
+## Ejemplos de API
+
+Listar modelos:
+
+```bash
+curl http://localhost:4000/v1/models \
+  -H "Authorization: Bearer maravillas123"
+```
+
+Chat simple:
 
 ```bash
 curl http://localhost:4000/v1/chat/completions \
--H "Authorization: Bearer maravillas123" \
--H "Content-Type: application/json" \
--d '{
-  "messages":[{"role":"user","content":"Hello"}]
-}'
+  -H "Authorization: Bearer maravillas123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen2.5-coder:7b",
+    "messages": [
+      {"role":"user","content":"Hello"}
+    ]
+  }'
 ```
 
----
-
-## Priority Override
+Chat streaming:
 
 ```bash
--H "X-Priority: high"
+curl -N http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer maravillas123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen2.5-coder:7b",
+    "stream": true,
+    "messages": [
+      {"role":"user","content":"Describe this server in one sentence."}
+    ]
+  }'
 ```
 
----
+Client tools:
 
-## Embeddings
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer maravillas123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen2.5-coder:7b",
+    "tool_execution_mode": "client",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "python",
+          "description": "Run Python",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "code": {"type": "string"}
+            },
+            "required": ["code"]
+          }
+        }
+      }
+    ],
+    "messages": [
+      {"role":"user","content":"Use python to compute 19*23."}
+    ]
+  }'
+```
+
+Prioridad explícita:
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer admin123" \
+  -H "X-Priority: high" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"hello"}]}'
+```
+
+Embeddings:
 
 ```bash
 curl http://localhost:4000/v1/embeddings \
--H "Authorization: Bearer batch123" \
--H "Content-Type: application/json" \
--d '{
-  "input": "hello world"
-}'
+  -H "Authorization: Bearer batch123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "all-minilm:latest",
+    "input": "hello world"
+  }'
 ```
 
----
-
-# 📊 Metrics
-
-## JSON endpoint
-
-```bash
-curl http://localhost:4000/metrics
-```
-
-Includes:
-
-* wait_p95
-* latency_p95
-* tokens_streamed
-* queue sizes
-
----
-
-## Prometheus endpoint
+Prometheus metrics:
 
 ```bash
 curl http://localhost:4000/metrics/prometheus
 ```
 
-Example metrics:
+## Verificación
 
-```
-llm_requests_total
-llm_tokens_streamed_total
-llm_wait_p95
-llm_latency_p95
-```
-
----
-
-# 📈 Grafana Provisioning (Step-by-Step)
-
-## 1. Datasource
-
-Create:
-
-`grafana/provisioning/datasources/datasource.yml`
-
-```yaml
-apiVersion: 1
-
-datasources:
-  - name: Prometheus
-    type: prometheus
-    access: proxy
-    url: http://prometheus:9090
-```
-
----
-
-## 2. Dashboard provider
-
-Create:
-
-`grafana/provisioning/dashboards/dashboard.yml`
-
-```yaml
-apiVersion: 1
-
-providers:
-  - name: default
-    folder: ""
-    type: file
-    options:
-      path: /etc/grafana/provisioning/dashboards
-```
-
----
-
-## 3. Dashboard definition
-
-Create:
-
-`grafana/provisioning/dashboards/llm.json`
-
-```json
-{
-  "title": "LLM Metrics",
-  "panels": [
-    {
-      "type": "graph",
-      "title": "Requests Total",
-      "targets": [
-        { "expr": "llm_requests_total" }
-      ]
-    },
-    {
-      "type": "graph",
-      "title": "Tokens Streamed",
-      "targets": [
-        { "expr": "llm_tokens_streamed_total" }
-      ]
-    }
-  ]
-}
-```
-
----
-
-## 4. Restart Grafana
+Desde `/home/tupolev`:
 
 ```bash
-docker compose restart grafana
+BASE_URL="https://nuc.fritz.box" API_KEY="maravillas123" bash e2e.sh -vv
 ```
 
----
+Estado validado durante esta puesta al día:
 
-# 🧪 Concurrency Test
-
-```bash
-(
-curl ... low &
-curl ... low &
-curl ... low &
-
-sleep 3
-
-curl ... high &
-
-wait
-)
+```text
+Summary: total=6 ok=6 fail=0
 ```
 
----
+## Notas operativas
 
-# 🧠 Scheduler Behavior
-
-* Non-preemptive (like OpenAI / vLLM)
-* Priority applied at queue level
-* FIFO within same priority
-* Chat and embeddings isolated
-
----
-
-# 🐧 Run on Linux Startup (systemd)
-
-## 1. Create service file
-
-```bash
-sudo nano /etc/systemd/system/llm-stack.service
-```
-
----
-
-## 2. Add content
-
-```ini
-[Unit]
-Description=LLM Stack (Docker Compose)
-After=docker.service
-Requires=docker.service
-
-[Service]
-WorkingDirectory=/path/to/llm-stack
-ExecStart=/usr/bin/docker compose up -d
-ExecStop=/usr/bin/docker compose down
-Restart=always
-TimeoutStartSec=0
-
-[Install]
-WantedBy=multi-user.target
-```
-
----
-
-## 3. Enable service
-
-```bash
-sudo systemctl daemon-reexec
-sudo systemctl daemon-reload
-sudo systemctl enable llm-stack
-sudo systemctl start llm-stack
-```
-
----
-
-## 4. Check status
-
-```bash
-systemctl status llm-stack
-```
-
----
-
-# ⚠️ Current Limitations
-
-* No rate limiting per API key
-* No fairness / anti-starvation
-* Single-node Ollama
-* Basic dashboards only
-
----
-
-# 🚀 Possible Improvements
-
-* Rate limiting per API key
-* Multi-node Ollama (load balancing)
-* Advanced dashboards
-* Admin API for key management
-* Usage tracking per user
-
----
-
-# 🏁 Status
-
-```
-✔ Production-ready local LLM stack
-✔ Priority scheduler
-✔ Observability included
-✔ Fully reproducible
-```
-
----
-
-# 🧑‍💻 Notes
-
-This stack is designed for:
-
-* Local development
-* Private AI infrastructure
-* Controlled LLM serving environments
+- Open WebUI no expone la API OpenAI-compatible de esta pila; esa la sirve el `adapter`.
+- Prometheus y Grafana están pensados principalmente para tráfico interno de la propia pila.
+- Si cambias rutas públicas del adapter, probablemente tendrás que ajustar también `Caddyfile`.
