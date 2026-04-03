@@ -9,7 +9,7 @@ VERBOSE=0
 usage() {
   cat <<'USAGE'
 Usage:
-  BASE_URL="https://nuc" API_KEY="<key>" bash /home/tupolev/e2e.sh [-vv]
+  BASE_URL="https://nuc" API_KEY="<key>" bash e2e.sh [-vv]
 
 Options:
   -vv   Verbose mode: show request payloads and full outputs.
