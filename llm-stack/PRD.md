@@ -8,6 +8,11 @@ Local LLM Stack for NUC
 
 This document is written for human operators and coding agents that need to understand, maintain, extend, or troubleshoot this project from zero context. It describes the goals, architecture, runtime model, security model, current capabilities, and known limitations of the stack.
 
+Document split:
+
+- [`README.md`](/home/tupolev/llm-stack/README.md) is the short operator guide for installation, configuration, and day-to-day operations.
+- This PRD is the detailed context document for AI agents and deeper technical onboarding.
+
 ## Executive Summary
 
 This project runs a self-hosted LLM platform on a NUC. The stack exposes an OpenAI-compatible API through a custom FastAPI adapter placed in front of Ollama, serves a browser UI through Open WebUI, and includes observability with Prometheus and Grafana.

@@ -1,19 +1,32 @@
 # Local LLM Stack
 
-Stack local con:
+Stack local para un NUC con:
 
 - Ollama en el host
-- Adapter FastAPI con API tipo OpenAI
+- adapter FastAPI con API compatible con OpenAI
 - Open WebUI detrás de Caddy
-- Prometheus + Grafana
+- Prometheus y Grafana
 - SQLite para API keys y prioridades
-- Almacenamiento protegido de API keys con secreto y salt
+
+Este documento está pensado para la persona que instala, configura y opera el proyecto.
+Si lo que necesitas es contexto profundo para un agente de IA, consulta [`PRD.md`](/home/tupolev/llm-stack/PRD.md).
+
+## Qué hace
+
+La pila expone una API tipo OpenAI para clientes y agentes, una interfaz web con Open WebUI y métricas locales para observabilidad.
+
+Rutas principales:
+
+- `https://nuc.fritz.box/v1/...` -> adapter
+- `https://nuc.fritz.box/` -> Open WebUI
+- `https://nuc.fritz.box/metrics` -> métricas JSON del adapter
+- `https://nuc.fritz.box/metrics/prometheus` -> métricas Prometheus del adapter
 
 ## Arquitectura
 
 ```text
 Cliente
-  -> Caddy (https://nuc.fritz.box)
+  -> Caddy
     -> /v1/* -> adapter:4000
     -> /metrics -> adapter:4000
     -> /metrics/* -> adapter:4000
@@ -30,99 +43,93 @@ Prometheus
   -> scrape host.docker.internal:9100
 ```
 
-## Endpoints útiles
+## Requisitos
 
-- API OpenAI-compatible directa: `http://localhost:4000`
-- API OpenAI-compatible vía Caddy: `https://nuc.fritz.box/v1/...`
-- Open WebUI: `https://nuc.fritz.box/`
-- Métricas JSON del adapter: `https://nuc.fritz.box/metrics`
-- Métricas Prometheus del adapter: `https://nuc.fritz.box/metrics/prometheus`
-- Prometheus UI: `http://localhost:9090`
-- Grafana: `http://localhost:3001`
+- Docker y Docker Compose
+- Ollama accesible desde el host
+- certificados y configuración de Caddy válidos para `nuc.fritz.box`
+- un fichero `.env` local con los valores reales
 
-## Funcionalidad actual del adapter
+## Configuración
 
-- `POST /v1/chat/completions`
-- `POST /v1/embeddings`
-- `GET /v1/models`
-- `GET /v1/tools`
-- `POST /v1/tools/web_search`
-- `POST /v1/tools/python`
-- `POST /v1/tools/save_file`
-- `POST /v1/tools/fetch_url`
-- `POST /v1/tools/weather`
-- `POST /v1/tools/time`
-- `POST /v1/tools/calendar`
-- `POST /v1/tools/news_search`
-- `POST /v1/tools/geocode`
-- `POST /v1/tools/http_request`
-- `POST /v1/tools/sqlite_query`
-- `POST /v1/tools/shell_safe`
-- `POST /v1/tools/calendar_events`
-- `GET /v1/openapi.json`
-- `GET /metrics`
-- `GET /metrics/prometheus`
+Hay una plantilla en [` .env.example `](/home/tupolev/llm-stack/.env.example).
 
-Además soporta:
+Preparación inicial:
 
-- Streaming SSE en chat
-- Colas con prioridad `high` / `medium` / `low`
-- Modo tools `server`
-- Modo tools `client`
-- Traducción de `tool_calls` entre formato OpenAI y Ollama
-- Búsqueda web multi-provider con Google y DuckDuckGo
-- Búsqueda de noticias recientes con Google News RSS
-- Geocoding y reverse geocoding con OpenStreetMap
-- Lectura directa de URLs y APIs JSON
-- Weather lookup sin depender del conocimiento del modelo
-- Tools de hora y calendario para fechas y planificación
-- Consultas SQLite para datos locales
-- Shell allowlisted para inspección segura del sistema
-- Lectura de eventos reales desde feeds o ficheros ICS
-- Métricas de latencia, colas, streaming y tools
+```bash
+cd /home/tupolev/llm-stack
+cp .env.example .env
+```
 
-## Variables del adapter
-
-El adapter lee estas variables:
+Después edita `.env` y rellena al menos:
 
 - `OLLAMA_URL`
-- `FILES_DIR`
 - `AUTH_DB_PATH`
+- `FILES_DIR`
 - `API_KEY_SECRET`
 - `API_KEY_SALT`
-- `CHAT_CONCURRENCY`
-- `EMBED_CONCURRENCY`
-- `QUEUE_TIMEOUT`
-- `TOOL_MAX_ITERATIONS`
-- `TOOL_ARG_MAX_LEN`
-- `TOOL_OUTPUT_MAX_LEN`
-- `PYTHON_TIMEOUT`
-- `PYTHON_CODE_MAX_LEN`
 - `DEFAULT_MODEL`
-- `TOOL_EXECUTION_MODE`
-- `AUTO_ENABLE_LOCAL_TOOLS`
 
-Hay una plantilla en [.env.example](/home/tupolev/llm-stack/.env.example).
-El fichero real `.env` debe existir localmente y no se sube a git.
+Notas importantes:
+
+- `.env` no debe subirse a git
+- `adapter` carga su configuración usando `env_file`
+- si cambias `API_KEY_SECRET` o `API_KEY_SALT`, las API keys ya creadas dejarán de coincidir
+
+## Levantar la pila
+
+```bash
+cd /home/tupolev/llm-stack
+docker compose up -d
+```
+
+Servicios principales:
+
+- `adapter`
+- `open-webui`
+- `caddy`
+- `prometheus`
+- `grafana`
+- `ollama-exporter`
+- `node-exporter`
+
+## Operación habitual
+
+Reconstruir el adapter tras cambios en Python:
+
+```bash
+cd /home/tupolev/llm-stack
+docker compose build adapter
+docker compose up -d adapter
+```
+
+Recargar Caddy tras cambios en [`Caddyfile`](/home/tupolev/llm-stack/Caddyfile):
+
+```bash
+cd /home/tupolev/llm-stack
+docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
+```
+
+Ver el estado de los servicios:
+
+```bash
+docker compose ps
+```
+
+Ver logs del adapter:
+
+```bash
+docker compose logs -f adapter
+```
 
 ## API keys
 
-Las API keys ya no deben almacenarse en claro. El adapter deriva un valor determinista protegido a partir de:
+Las API keys no se almacenan en claro. El adapter guarda un `key_hash` derivado a partir de:
 
 - `API_KEY_SECRET`
 - `API_KEY_SALT`
 
-Ese valor derivado es el que se guarda en SQLite y el que se usa para lookup en cada request.
-
-La consecuencia práctica es:
-
-- la base no contiene la API key original
-- el adapter necesita esas dos variables de entorno para validar requests
-- si cambias `API_KEY_SECRET` o `API_KEY_SALT`, las keys ya almacenadas dejarán de coincidir hasta que las recrees o migres con los mismos valores
-
-Base de datos: `data/auth.db`
-
-Tabla:
+La base de datos esperada es `data/auth.db` y la tabla es:
 
 ```sql
 CREATE TABLE api_keys (
@@ -131,7 +138,7 @@ CREATE TABLE api_keys (
 );
 ```
 
-Crear una key nueva de forma interactiva:
+Crear una API key nueva:
 
 ```bash
 cd /home/tupolev/llm-stack
@@ -141,60 +148,40 @@ export API_KEY_SALT='cambia-esto-tambien'
 python3 adapter/manage_api_keys.py create --priority high
 ```
 
-Listar hashes almacenados:
+Listar las keys almacenadas:
 
 ```bash
 python3 adapter/manage_api_keys.py list
 ```
 
-Migrar una base antigua que todavía tenga la columna `key` en claro:
+Migrar una base antigua con columna `key` en claro:
 
 ```bash
 python3 adapter/manage_api_keys.py migrate-legacy
 ```
 
-## Uso rápido
+## Endpoints útiles
 
-Levantar toda la pila:
+- API directa del adapter: `http://localhost:4000`
+- API vía Caddy: `https://nuc.fritz.box/v1/...`
+- Open WebUI: `https://nuc.fritz.box/`
+- Prometheus UI: `http://localhost:9090`
+- Grafana: `http://localhost:3001`
 
-```bash
-cp .env.example .env
-# editar .env con valores reales
-docker compose up -d
-```
-
-Reconstruir solo el adapter cuando cambie `adapter/app.py`:
-
-```bash
-docker compose build adapter
-docker compose up -d adapter
-```
-
-Recargar Caddy cuando cambie `Caddyfile`:
-
-```bash
-docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
-```
-
-Notas sobre configuración:
-
-- el servicio `adapter` carga `.env` mediante `env_file`
-- `.env.example` es solo plantilla; el `.env` real debe contener los secretos
-
-## Ejemplos de API
+## Ejemplos rápidos
 
 Listar modelos:
 
 ```bash
 curl http://localhost:4000/v1/models \
-  -H "Authorization: Bearer maravillas123"
+  -H "Authorization: Bearer TU_API_KEY"
 ```
 
 Chat simple:
 
 ```bash
 curl http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer maravillas123" \
+  -H "Authorization: Bearer TU_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "qwen2.5-coder:7b",
@@ -204,11 +191,11 @@ curl http://localhost:4000/v1/chat/completions \
   }'
 ```
 
-Chat streaming:
+Streaming:
 
 ```bash
 curl -N http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer maravillas123" \
+  -H "Authorization: Bearer TU_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "qwen2.5-coder:7b",
@@ -219,151 +206,53 @@ curl -N http://localhost:4000/v1/chat/completions \
   }'
 ```
 
-Client tools:
+## Validación end-to-end
+
+El script recomendado es [`/home/tupolev/e2e.sh`](/home/tupolev/e2e.sh).
+
+Está pensado para ejecutarse desde la máquina cliente donde corre el agente, no desde el NUC, y solo necesita:
+
+- `BASE_URL`
+- `API_KEY`
+
+Ejemplo:
 
 ```bash
-curl http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer maravillas123" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen2.5-coder:7b",
-    "tool_execution_mode": "client",
-    "tools": [
-      {
-        "type": "function",
-        "function": {
-          "name": "python",
-          "description": "Run Python",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "code": {"type": "string"}
-            },
-            "required": ["code"]
-          }
-        }
-      }
-    ],
-    "messages": [
-      {"role":"user","content":"Use python to compute 19*23."}
-    ]
-  }'
+BASE_URL="https://nuc.fritz.box" API_KEY="TU_API_KEY" bash /home/tupolev/e2e.sh -vv
 ```
 
-Prioridad explícita:
+## Qué incluye hoy el adapter
 
-```bash
-curl http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer admin123" \
-  -H "X-Priority: high" \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"hello"}]}'
-```
+Capacidades principales:
 
-Embeddings:
+- chat completions
+- embeddings
+- model listing
+- tools OpenAI-style
+- streaming SSE
+- modo `server` y modo `client` para tools
+- métricas JSON y Prometheus
 
-```bash
-curl http://localhost:4000/v1/embeddings \
-  -H "Authorization: Bearer batch123" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "all-minilm:latest",
-    "input": "hello world"
-  }'
-```
+Tools disponibles:
 
-Prometheus metrics:
+- `web_search`
+- `python`
+- `save_file`
+- `fetch_url`
+- `weather`
+- `time`
+- `calendar`
+- `news_search`
+- `geocode`
+- `http_request`
+- `sqlite_query`
+- `shell_safe`
+- `calendar_events`
 
-```bash
-curl http://localhost:4000/metrics/prometheus
-```
+## Troubleshooting rápido
 
-Weather tool:
-
-```bash
-curl http://localhost:4000/v1/tools/weather \
-  -H "Authorization: Bearer admin123" \
-  -H "Content-Type: application/json" \
-  -d '{"location":"Madrid"}'
-```
-
-Web search with Google:
-
-```bash
-curl http://localhost:4000/v1/tools/web_search \
-  -H "Authorization: Bearer admin123" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "OpenAI API latest models",
-    "provider": "google",
-    "max_results": 5
-  }'
-```
-
-News search:
-
-```bash
-curl http://localhost:4000/v1/tools/news_search \
-  -H "Authorization: Bearer admin123" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "AI regulation Europe",
-    "max_results": 5,
-    "language": "en",
-    "country": "US"
-  }'
-```
-
-Geocoding:
-
-```bash
-curl http://localhost:4000/v1/tools/geocode \
-  -H "Authorization: Bearer admin123" \
-  -H "Content-Type: application/json" \
-  -d '{"query":"Atocha Madrid","max_results":3}'
-```
-
-Safe shell:
-
-```bash
-curl http://localhost:4000/v1/tools/shell_safe \
-  -H "Authorization: Bearer admin123" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "command": "date -Iseconds",
-    "workdir": "/tmp"
-  }'
-```
-
-SQLite query:
-
-```bash
-curl http://localhost:4000/v1/tools/sqlite_query \
-  -H "Authorization: Bearer admin123" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "db_path": "/data/auth.db",
-    "query": "SELECT priority, COUNT(*) AS count FROM api_keys GROUP BY priority"
-  }'
-```
-
-## Verificación
-
-Desde `/home/tupolev`:
-
-```bash
-BASE_URL="https://nuc.fritz.box" API_KEY="maravillas123" bash e2e.sh -vv
-```
-
-Estado validado durante esta puesta al día:
-
-```text
-Summary: total=6 ok=6 fail=0
-```
-
-## Notas operativas
-
-- Open WebUI no expone la API OpenAI-compatible de esta pila; esa la sirve el `adapter`.
-- Prometheus y Grafana están pensados principalmente para tráfico interno de la propia pila.
-- Si cambias rutas públicas del adapter, probablemente tendrás que ajustar también `Caddyfile`.
-- Si cambias `API_KEY_SECRET` o `API_KEY_SALT`, tendrás que recrear o migrar las API keys con esos mismos valores.
+- Si cambias código en `adapter/app.py`, reconstruye y reinicia `adapter`.
+- Si cambias el proxy, recarga Caddy.
+- Si una API key deja de funcionar, revisa primero `API_KEY_SECRET`, `API_KEY_SALT` y `data/auth.db`.
+- Si una tool funciona mal desde un cliente, prueba antes el endpoint directo en `/v1/tools/...`.
+- Si el agente falla y no sabes si es problema del cliente o del stack, ejecuta `e2e.sh`.
