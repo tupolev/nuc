@@ -14,6 +14,10 @@ nuc.fritz.box {
         reverse_proxy adapter:4000
     }
 
+    handle /metrics/* {
+        reverse_proxy adapter:4000
+    }
+
     handle {
         reverse_proxy open-webui:8080
     }
