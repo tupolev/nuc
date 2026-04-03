@@ -33,4 +33,5 @@ llm-stack/adapter/__pycache__/
 llm-stack/certs/*
 llm-stack/data/*
 llm-stack/grafana-data/*
+.python_history
 .gitconfig
