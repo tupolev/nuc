@@ -2,6 +2,7 @@ services:
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
+#    container_name: open-webui
     restart: always
     ports:
       - "8080:8080"
@@ -20,6 +21,7 @@ services:
 
   caddy:
     image: caddy:latest
+#    container_name: caddy
     restart: always
     ports:
       - "80:80"
@@ -31,6 +33,7 @@ services:
 
   adapter:
     build: ./adapter
+#    container_name: ollama-adapter
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -41,6 +44,7 @@ services:
 
   prometheus:
     image: prom/prometheus
+ #   container_name: prometheus
     restart: always
     ports:
       - "9090:9090"
@@ -53,6 +57,7 @@ services:
 
   node-exporter:
     image: prom/node-exporter:latest
+  #  container_name: node-exporter
     restart: unless-stopped
     network_mode: host
     pid: host
@@ -64,12 +69,14 @@ services:
 
   ollama-exporter:
     build: ./ollama-exporter
+   # container_name: ollama-exporter
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
   grafana:
     image: grafana/grafana:latest
+    #container_name: grafana
     restart: unless-stopped
     ports:
       - "3001:3000"

@@ -173,7 +173,6 @@ async def enqueue(queue, lock, priority):
 
     future = asyncio.get_event_loop().create_future()
     counter += 1
-
     item = (priority, counter, future)
 
     async with lock:
@@ -228,7 +227,6 @@ async def startup():
 # =========================
 @app.post("/v1/chat/completions")
 async def chat(request: Request, req: dict):
-
     global chat_active
 
     METRICS["requests_total"] += 1
