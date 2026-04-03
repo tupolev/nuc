@@ -94,7 +94,7 @@ run_json_test() {
   fi
 
   if [[ "$status" != "200" ]]; then
-    fail "$name" "HTTP $status: $(echo "$body" | tr '\n' ' ' | cut -c1-220)"
+    fail "$name" "HTTP $status: $(echo "$body" | tr '\n' ' ' | cut -c1-240)"
     return
   fi
 
@@ -105,33 +105,79 @@ run_json_test() {
   fi
 }
 
-# 1) Smoke models
-TOTAL=$((TOTAL + 1))
-raw_models=$(curl -k -sS "$BASE_URL/v1/models" \
-  -H "Authorization: Bearer $API_KEY" \
-  -w '\nHTTP_STATUS:%{http_code}\n') || {
-    fail "Smoke /v1/models" "network/curl error"
-    raw_models=""
-  }
+run_get_test() {
+  local name="$1"
+  local endpoint="$2"
+  local jq_expr="$3"
 
-if [[ -n "${raw_models:-}" ]]; then
-  status=$(echo "$raw_models" | awk -F: '/^HTTP_STATUS:/{print $2}' | tail -n1)
-  body=$(echo "$raw_models" | sed '/^HTTP_STATUS:/d')
+  TOTAL=$((TOTAL + 1))
+
+  local raw status body
+  raw=$(curl -k -sS "$BASE_URL$endpoint" \
+    -H "Authorization: Bearer $API_KEY" \
+    -w '\nHTTP_STATUS:%{http_code}\n') || {
+      fail "$name" "network/curl error"
+      return
+    }
+
+  status=$(echo "$raw" | awk -F: '/^HTTP_STATUS:/{print $2}' | tail -n1)
+  body=$(echo "$raw" | sed '/^HTTP_STATUS:/d')
 
   if [[ $VERBOSE -eq 1 ]]; then
     echo
-    echo "--- RESPONSE: Smoke /v1/models (HTTP $status) ---"
+    echo "--- RESPONSE: $name (HTTP $status) ---"
     echo "$body" | jq . 2>/dev/null || echo "$body"
   fi
 
   if [[ "$status" != "200" ]]; then
-    fail "Smoke /v1/models" "HTTP $status"
-  elif echo "$body" | jq -e '.object == "list" and (.data | type == "array")' >/dev/null 2>&1; then
-    pass "Smoke /v1/models"
-  else
-    fail "Smoke /v1/models" "unexpected response structure"
+    fail "$name" "HTTP $status"
+    return
   fi
-fi
+
+  if echo "$body" | jq -e "$jq_expr" >/dev/null 2>&1; then
+    pass "$name"
+  else
+    fail "$name" "JSON validation failed for jq expression: $jq_expr"
+  fi
+}
+
+run_status_test() {
+  local name="$1"
+  local endpoint="$2"
+  local expected_status="$3"
+  local auth_header="${4:-Bearer $API_KEY}"
+
+  TOTAL=$((TOTAL + 1))
+
+  local raw status body
+  raw=$(curl -k -sS "$BASE_URL$endpoint" \
+    -H "Authorization: $auth_header" \
+    -w '\nHTTP_STATUS:%{http_code}\n') || {
+      fail "$name" "network/curl error"
+      return
+    }
+
+  status=$(echo "$raw" | awk -F: '/^HTTP_STATUS:/{print $2}' | tail -n1)
+  body=$(echo "$raw" | sed '/^HTTP_STATUS:/d')
+
+  if [[ $VERBOSE -eq 1 ]]; then
+    echo
+    echo "--- RESPONSE: $name (HTTP $status) ---"
+    echo "$body" | jq . 2>/dev/null || echo "$body"
+  fi
+
+  if [[ "$status" == "$expected_status" ]]; then
+    pass "$name"
+  else
+    fail "$name" "expected HTTP $expected_status, got HTTP $status"
+  fi
+}
+
+# 1) Smoke models
+run_get_test \
+  "Smoke /v1/models" \
+  "/v1/models" \
+  '.object == "list" and (.data | type == "array") and (.data | length > 0)'
 
 # 2) Streaming chat without tools
 TOTAL=$((TOTAL + 1))
@@ -298,7 +344,89 @@ JSON
   fi
 fi
 
-# 6) Metrics
+# 6) Tools catalog
+run_get_test \
+  "Tools catalog" \
+  "/v1/tools" \
+  '.data | type == "array" and (map(.function.name) | index("python")) != null and (map(.function.name) | index("weather")) != null and (map(.function.name) | index("news_search")) != null'
+
+# 7) Weather tool
+run_json_test \
+  "Weather tool" \
+  "/v1/tools/weather" \
+  '{"location":"Madrid"}' \
+  '.source == "wttr.in" and (.current.temp_c | type == "string") and (.forecast | type == "array" and length > 0)'
+
+# 8) Time tool
+run_json_test \
+  "Time tool" \
+  "/v1/tools/time" \
+  '{"timezone":"Europe/Madrid"}' \
+  '.timezone == "Europe/Madrid" and (.iso | type == "string") and (.weekday | type == "string")'
+
+# 9) Calendar tool
+run_json_test \
+  "Calendar tool" \
+  "/v1/tools/calendar" \
+  '{"year":2026,"month":4}' \
+  '.year == 2026 and .month == 4 and (.rendered_month | type == "string" and contains("April 2026"))'
+
+# 10) Fetch URL tool
+run_json_test \
+  "Fetch URL tool" \
+  "/v1/tools/fetch_url" \
+  '{"url":"https://wttr.in/Madrid?format=j1","mode":"json"}' \
+  '(.status_code == 200) and (.content_type | startswith("application/json"))'
+
+# 11) News search tool
+run_json_test \
+  "News search tool" \
+  "/v1/tools/news_search" \
+  '{"query":"AI regulation Europe","max_results":3,"language":"en","country":"US"}' \
+  '.provider == "google_news_rss" and (.results | type == "array" and length > 0)'
+
+# 12) Geocode tool
+run_json_test \
+  "Geocode tool" \
+  "/v1/tools/geocode" \
+  '{"query":"Atocha Madrid","max_results":2}' \
+  '.provider == "nominatim" and (.results | type == "array" and length > 0)'
+
+# 13) HTTP request tool
+run_json_test \
+  "HTTP request tool" \
+  "/v1/tools/http_request" \
+  '{"url":"https://wttr.in/Madrid?format=j1","method":"GET","mode":"json"}' \
+  '.status_code == 200 and .method == "GET" and (.json.current_condition | type == "array")'
+
+# 14) OpenAPI spec
+run_get_test \
+  "OpenAPI spec" \
+  "/v1/openapi.json" \
+  '(.openapi | type == "string") and (.paths["/v1/tools/weather"] != null) and (.paths["/v1/tools/python"] != null)'
+
+# 15) Safe shell tool
+run_json_test \
+  "Safe shell tool" \
+  "/v1/tools/shell_safe" \
+  '{"command":"date -Iseconds","workdir":"/tmp"}' \
+  '.returncode == 0 and (.stdout | type == "string" and length > 0)'
+
+# 16) Web search tool
+run_json_test \
+  "Web search tool" \
+  "/v1/tools/web_search" \
+  '{"query":"OpenAI API latest models","provider":"auto","max_results":3}' \
+  '(.results | type == "array" and length > 0) and (.provider == "google" or .provider == "duckduckgo")'
+
+# 17) Unauthorized request should fail
+run_status_test \
+  "Unauthorized /v1/models" \
+  "/v1/models" \
+  "401" \
+  "Bearer definitely-invalid-key"
+
+# 18) Metrics
 TOTAL=$((TOTAL + 1))
 metrics_out=$(curl -k -sS "$BASE_URL/metrics/prometheus") || {
   fail "Prometheus metrics" "network/curl error"

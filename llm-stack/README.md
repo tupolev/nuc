@@ -49,6 +49,16 @@ Prometheus
 - `POST /v1/tools/web_search`
 - `POST /v1/tools/python`
 - `POST /v1/tools/save_file`
+- `POST /v1/tools/fetch_url`
+- `POST /v1/tools/weather`
+- `POST /v1/tools/time`
+- `POST /v1/tools/calendar`
+- `POST /v1/tools/news_search`
+- `POST /v1/tools/geocode`
+- `POST /v1/tools/http_request`
+- `POST /v1/tools/sqlite_query`
+- `POST /v1/tools/shell_safe`
+- `POST /v1/tools/calendar_events`
 - `GET /v1/openapi.json`
 - `GET /metrics`
 - `GET /metrics/prometheus`
@@ -60,6 +70,15 @@ Además soporta:
 - Modo tools `server`
 - Modo tools `client`
 - Traducción de `tool_calls` entre formato OpenAI y Ollama
+- Búsqueda web multi-provider con Google y DuckDuckGo
+- Búsqueda de noticias recientes con Google News RSS
+- Geocoding y reverse geocoding con OpenStreetMap
+- Lectura directa de URLs y APIs JSON
+- Weather lookup sin depender del conocimiento del modelo
+- Tools de hora y calendario para fechas y planificación
+- Consultas SQLite para datos locales
+- Shell allowlisted para inspección segura del sistema
+- Lectura de eventos reales desde feeds o ficheros ICS
 - Métricas de latencia, colas, streaming y tools
 
 ## Variables del adapter
@@ -257,6 +276,75 @@ Prometheus metrics:
 
 ```bash
 curl http://localhost:4000/metrics/prometheus
+```
+
+Weather tool:
+
+```bash
+curl http://localhost:4000/v1/tools/weather \
+  -H "Authorization: Bearer admin123" \
+  -H "Content-Type: application/json" \
+  -d '{"location":"Madrid"}'
+```
+
+Web search with Google:
+
+```bash
+curl http://localhost:4000/v1/tools/web_search \
+  -H "Authorization: Bearer admin123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "OpenAI API latest models",
+    "provider": "google",
+    "max_results": 5
+  }'
+```
+
+News search:
+
+```bash
+curl http://localhost:4000/v1/tools/news_search \
+  -H "Authorization: Bearer admin123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "AI regulation Europe",
+    "max_results": 5,
+    "language": "en",
+    "country": "US"
+  }'
+```
+
+Geocoding:
+
+```bash
+curl http://localhost:4000/v1/tools/geocode \
+  -H "Authorization: Bearer admin123" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"Atocha Madrid","max_results":3}'
+```
+
+Safe shell:
+
+```bash
+curl http://localhost:4000/v1/tools/shell_safe \
+  -H "Authorization: Bearer admin123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "command": "date -Iseconds",
+    "workdir": "/tmp"
+  }'
+```
+
+SQLite query:
+
+```bash
+curl http://localhost:4000/v1/tools/sqlite_query \
+  -H "Authorization: Bearer admin123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "db_path": "/data/auth.db",
+    "query": "SELECT priority, COUNT(*) AS count FROM api_keys GROUP BY priority"
+  }'
 ```
 
 ## Verificación
