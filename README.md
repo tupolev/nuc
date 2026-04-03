@@ -1,30 +1,59 @@
-# 🧠 Local LLM Stack (Ollama + Adapter + Prometheus + Grafana)
+# Local LLM Stack
 
-A fully local, production-style LLM serving stack with:
+A local NUC-based LLM stack with:
 
-* OpenAI-compatible API
-* Priority-based scheduler
-* Observability (Prometheus + Grafana)
-* SQLite-based API key management
-* TLS via Caddy (local domain: `nuc`)
-* Automatic model warmup
+- Ollama on the host
+- a FastAPI adapter exposing an OpenAI-compatible API
+- Open WebUI behind Caddy
+- Prometheus and Grafana
+- SQLite for API keys and priorities
+- local HTTPS routing and service orchestration
 
----
+This README is for the human operator who installs, configures, and runs the project.
+If you need deeper technical context for an AI agent, see [`PRD.md`](/home/tupolev/PRD.md).
 
-# 🚀 Architecture
+## What It Does
 
+The stack exposes:
+
+- an OpenAI-style API for clients and coding agents
+- a browser UI through Open WebUI
+- local JSON and Prometheus metrics
+- priority-aware scheduling for chat and embeddings
+
+The adapter is modularized for maintainability:
+
+- [`app.py`](/home/tupolev/llm-stack/adapter/app.py): FastAPI composition and routes
+- [`config.py`](/home/tupolev/llm-stack/adapter/config.py): environment variables and constants
+- [`state.py`](/home/tupolev/llm-stack/adapter/state.py): auth DB, queues, and metrics
+- [`tooling.py`](/home/tupolev/llm-stack/adapter/tooling.py): tools and tool registry
+- [`openai_compat.py`](/home/tupolev/llm-stack/adapter/openai_compat.py): OpenAI/Ollama compatibility and tool calling
+
+## Architecture
+
+```text
+Client
+  -> Caddy
+    -> /v1/* -> adapter:4000
+    -> /metrics -> adapter:4000
+    -> /metrics/* -> adapter:4000
+    -> /* -> open-webui:8080
+
+adapter
+  -> Ollama on host.docker.internal:11434
+  -> /data/auth.db
+  -> /data/files
+
+Prometheus
+  -> scrape adapter:4000/metrics/prometheus
+  -> scrape ollama-exporter:9101
+  -> scrape host.docker.internal:9100
+
+Grafana
+  -> reads Prometheus
 ```
-Client → Caddy (TLS)
-       → Adapter (FastAPI)
-       → Scheduler (priority + queues)
-       → Ollama (LLM)
 
-Metrics → Prometheus → Grafana
-```
-
----
-
-# ⚡ One-Command Installation (Ubuntu)
+## One-Command Ubuntu Installation
 
 Install everything on a clean Ubuntu machine:
 
@@ -32,368 +61,360 @@ Install everything on a clean Ubuntu machine:
 curl -fsSL https://raw.githubusercontent.com/tupolev/nuc/main/install.sh | bash
 ```
 
----
+The installer is intended to:
 
-## 🧠 What the installer does
+1. update the system
+2. install dependencies such as `git`, `curl`, and `sqlite3`
+3. install Docker and Docker Compose
+4. clone the project into `/opt/llm-stack`
+5. create the auth database and API keys
+6. build and start the containers
+7. configure systemd services
+8. enable autostart
+9. warm up Ollama models
 
-The script will:
+## Manual Requirements
 
-1. Update the system
-2. Install dependencies (git, curl, sqlite3…)
-3. Install Docker + Compose
-4. Clone repo into:
+If you are not using the installer, you need:
 
-```
-/opt/llm-stack
-```
+- Docker and Docker Compose
+- Ollama reachable from the host
+- valid Caddy certificates and config for `nuc.fritz.box`
+- a local `.env` file with real values
 
-5. Create SQLite DB + API keys
-6. Build and start containers
-7. Configure systemd services:
+## Configuration
 
-   * `llm-stack.service`
-   * `ollama-warmup.service`
-8. Enable auto-start on boot
-9. Warm up Ollama models
+A template is available in [` .env.example `](/home/tupolev/llm-stack/.env.example).
 
----
-
-# 🌐 Endpoints
-
-| Service      | URL                                                  |
-| ------------ | ---------------------------------------------------- |
-| OpenWebUI    | [http://localhost:8080](http://localhost:8080)       |
-| API (direct) | [http://localhost:4000/v1](http://localhost:4000/v1) |
-| API (TLS)    | [https://nuc/v1](https://nuc/v1)                     |
-| Prometheus   | [http://localhost:9090](http://localhost:9090)       |
-| Grafana      | [http://localhost:3001](http://localhost:3001)       |
-
----
-
-# 🧩 Components
-
-* **Ollama** → runs LLM models locally
-* **Adapter (FastAPI)** → OpenAI-compatible API + scheduler
-* **Caddy** → TLS + reverse proxy
-* **Prometheus** → metrics scraping
-* **Grafana** → dashboards
-* **SQLite (`auth.db`)** → API keys + priorities
-
----
-
-# ⚙️ Features
-
-* Priority queue (high / medium / low)
-* Separate queues:
-
-  * chat
-  * embeddings
-* Concurrency control
-* Streaming (SSE, OpenAI-compatible)
-* Request cancellation
-* Queue timeout
-* Prometheus metrics (p95 latency)
-* Grafana dashboards
-* Automatic model warmup
-* Fully local (no external APIs)
-
----
-
-# 📁 Project Structure
-
-```
-llm-stack/
-├── docker-compose.yml
-├── adapter/
-│   ├── app.py
-│   └── Dockerfile
-├── data/
-│   └── auth.db
-├── prometheus/
-│   └── prometheus.yml
-├── grafana/
-│   └── provisioning/
-│       ├── datasources/
-│       │   └── datasource.yml
-│       └── dashboards/
-│           ├── dashboard.yml
-│           └── llm.json
-├── Caddyfile
-```
-
----
-
-# 🔐 API Keys (SQLite)
-
-## Default keys
-
-| Key      | Priority |
-| -------- | -------- |
-| admin123 | high     |
-| test123  | medium   |
-| batch123 | low      |
-
----
-
-## Manual setup (optional)
+Initial setup:
 
 ```bash
-sqlite3 data/auth.db
+cd /home/tupolev/llm-stack
+cp .env.example .env
 ```
 
-```sql
-CREATE TABLE api_keys (
-  key TEXT PRIMARY KEY,
-  priority TEXT
-);
+Then edit `.env` and fill in at least:
 
-INSERT INTO api_keys VALUES ('test123', 'medium');
-INSERT INTO api_keys VALUES ('admin123', 'high');
-INSERT INTO api_keys VALUES ('batch123', 'low');
-```
+- `OLLAMA_URL`
+- `AUTH_DB_PATH`
+- `FILES_DIR`
+- `API_KEY_SECRET`
+- `API_KEY_SALT`
+- `DEFAULT_MODEL`
 
----
+Important notes:
 
-# 🧠 Priority Levels
+- `.env` must not be committed to git
+- the `adapter` service loads its configuration through `env_file`
+- if you change `API_KEY_SECRET` or `API_KEY_SALT`, existing API keys will stop matching
 
-| Level  | Value | Use case         |
-| ------ | ----- | ---------------- |
-| high   | 0     | UI / interactive |
-| medium | 1     | normal usage     |
-| low    | 2     | batch jobs       |
-
----
-
-# 📡 API Usage
-
-## Chat
+## Start the Stack
 
 ```bash
-curl https://nuc/v1/chat/completions \
--H "Authorization: Bearer test123" \
--H "Content-Type: application/json" \
--d '{
-  "model":"qwen2.5-coder:7b",
-  "messages":[{"role":"user","content":"Hello"}]
-}'
+cd /home/tupolev/llm-stack
+docker compose up -d
 ```
 
----
+Main services:
 
-## Priority Override
+- `adapter`
+- `open-webui`
+- `caddy`
+- `prometheus`
+- `grafana`
+- `ollama-exporter`
+- `node-exporter`
+
+## Day-to-Day Operations
+
+Rebuild the adapter after Python changes:
 
 ```bash
--H "X-Priority: high"
+cd /home/tupolev/llm-stack
+docker compose build adapter
+docker compose up -d adapter
 ```
 
----
+This applies if you change [`app.py`](/home/tupolev/llm-stack/adapter/app.py) or any other Python module under [`adapter/`](/home/tupolev/llm-stack/adapter).
 
-## Embeddings
+Reload Caddy after changes to [`Caddyfile`](/home/tupolev/llm-stack/Caddyfile):
 
 ```bash
-curl https://nuc/v1/embeddings \
--H "Authorization: Bearer batch123" \
--H "Content-Type: application/json" \
--d '{
-  "input": "hello world"
-}'
+cd /home/tupolev/llm-stack
+docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
 ```
 
----
-
-# 📊 Metrics
-
-## JSON
+Check service status:
 
 ```bash
-curl http://localhost:4000/metrics
+cd /home/tupolev/llm-stack
+docker compose ps
 ```
 
----
-
-## Prometheus
+View adapter logs:
 
 ```bash
-curl http://localhost:4000/metrics/prometheus
+cd /home/tupolev/llm-stack
+docker compose logs -f adapter
 ```
 
----
+## systemd Services
 
-## Prometheus target
+If you installed the stack as a system service, useful commands are:
 
-```
-http://adapter:4000/metrics/prometheus
-```
-
----
-
-# 📈 Grafana
-
-## Access
-
-```
-http://localhost:3001
-```
-
----
-
-## Important note
-
-Use **rate() / increase()** for counters:
-
-Example:
-
-```
-rate(llm_requests_total[1m])
-```
-
----
-
-# 🔥 Ollama Warmup
-
-Automatically executed on boot.
-
-## Wrapper
-
-```
-/usr/local/bin/warm-ollama-wrapper.sh
-```
-
-### Behavior
-
-1. Waits for Ollama readiness
-2. Executes:
-
-```
-/opt/llm-stack/warm-ollama.sh
-```
-
----
-
-## Benefits
-
-* Faster first token
-* No cold start
-* Embeddings preloaded
-
----
-
-# 🐧 systemd Services
-
-## LLM stack
+Check main stack service:
 
 ```bash
 systemctl status llm-stack
 ```
 
----
-
-## Warmup
+Check warmup service:
 
 ```bash
 systemctl status ollama-warmup
 ```
 
----
-
-## Restart
+Restart the stack:
 
 ```bash
 sudo systemctl restart llm-stack
 ```
 
----
-
-## Logs
+View logs:
 
 ```bash
 journalctl -u llm-stack -f
 journalctl -u ollama-warmup -f
 ```
 
----
+Warmup wrapper path:
 
-# 🧪 Concurrency Test
-
-```bash
-(
-curl ... low &
-curl ... low &
-curl ... low &
-
-sleep 3
-
-curl ... high &
-
-wait
-)
+```text
+/usr/local/bin/warm-ollama-wrapper.sh
 ```
 
----
+Warmup behavior:
 
-# 🧠 Scheduler Behavior
+1. waits for Ollama readiness
+2. executes `/opt/llm-stack/warm-ollama.sh`
 
-* Non-preemptive
-* Priority-based queue
-* FIFO within same priority
-* Chat & embeddings isolated
+## API Keys
 
----
+API keys are not stored in plaintext. The adapter stores a derived `key_hash` built from:
 
-# ⚠️ Limitations
+- `API_KEY_SECRET`
+- `API_KEY_SALT`
 
-* No per-key rate limiting
-* No anti-starvation
-* Single-node Ollama
+The expected database is `data/auth.db` and the table is:
 
----
+```sql
+CREATE TABLE api_keys (
+  key_hash TEXT PRIMARY KEY,
+  priority TEXT NOT NULL
+);
+```
 
-# 🚀 Possible Improvements
+Create a new API key:
 
-* Rate limiting per API key
-* Multi-node Ollama
-* Better dashboards
-* Admin UI for keys
-* Usage tracking
+```bash
+cd /home/tupolev/llm-stack
+export AUTH_DB_PATH=/home/tupolev/llm-stack/data/auth.db
+export API_KEY_SECRET='change-this'
+export API_KEY_SALT='change-this-too'
+python3 adapter/manage_api_keys.py create --priority high
+```
 
----
+List stored keys:
 
-# 🧼 Uninstall
+```bash
+python3 adapter/manage_api_keys.py list
+```
+
+Migrate an older database that still has a plaintext `key` column:
+
+```bash
+python3 adapter/manage_api_keys.py migrate-legacy
+```
+
+## Priority Levels
+
+| Level | Value | Typical use case |
+| --- | --- | --- |
+| high | 0 | UI or interactive requests |
+| medium | 1 | normal usage |
+| low | 2 | batch jobs and embeddings |
+
+## Useful Endpoints
+
+- Direct adapter API: `http://localhost:4000`
+- API through Caddy: `https://nuc.fritz.box/v1/...`
+- Open WebUI: `https://nuc.fritz.box/`
+- Prometheus UI: `http://localhost:9090`
+- Grafana: `http://localhost:3001`
+
+## Quick Examples
+
+List models:
+
+```bash
+curl http://localhost:4000/v1/models \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+Simple chat:
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen2.5-coder:7b",
+    "messages": [
+      {"role":"user","content":"Hello"}
+    ]
+  }'
+```
+
+Priority override:
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-Priority: high" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"hello"}]}'
+```
+
+Embeddings:
+
+```bash
+curl http://localhost:4000/v1/embeddings \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"input":"hello world"}'
+```
+
+Streaming chat:
+
+```bash
+curl -N http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen2.5-coder:7b",
+    "stream": true,
+    "messages": [
+      {"role":"user","content":"Describe this server in one sentence."}
+    ]
+  }'
+```
+
+## Metrics
+
+JSON metrics:
+
+```bash
+curl http://localhost:4000/metrics
+```
+
+Prometheus metrics:
+
+```bash
+curl http://localhost:4000/metrics/prometheus
+```
+
+Prometheus scrape target:
+
+```text
+http://adapter:4000/metrics/prometheus
+```
+
+Grafana:
+
+```text
+http://localhost:3001
+```
+
+For counters in Grafana, prefer `rate()` or `increase()`.
+
+Example:
+
+```text
+rate(llm_requests_total[1m])
+```
+
+## End-to-End Validation
+
+The recommended validation script is [`e2e.sh`](/home/tupolev/e2e.sh).
+
+It is meant to run from the client machine where the agent runs, not from the NUC itself, and it only needs:
+
+- `BASE_URL`
+- `API_KEY`
+
+Example:
+
+```bash
+BASE_URL="https://nuc.fritz.box" API_KEY="YOUR_API_KEY" bash /home/tupolev/e2e.sh -vv
+```
+
+## Current Features
+
+- OpenAI-compatible chat completions
+- embeddings
+- model listing
+- OpenAI-style tools
+- SSE streaming
+- `server` and `client` tool modes
+- JSON and Prometheus metrics
+- priority scheduling
+- separate chat and embeddings queues
+- concurrency control
+- queue timeout
+- local tools for live information and utility actions
+
+Available tools:
+
+- `web_search`
+- `python`
+- `save_file`
+- `fetch_url`
+- `weather`
+- `time`
+- `calendar`
+- `news_search`
+- `geocode`
+- `http_request`
+- `sqlite_query`
+- `shell_safe`
+- `calendar_events`
+
+## Scheduler Notes
+
+- non-preemptive
+- priority-based queue
+- FIFO within the same priority
+- chat and embeddings are isolated
+
+## Current Limitations
+
+- no per-key rate limiting
+- no anti-starvation mechanism
+- single-node Ollama
+- not designed as a hardened public internet service
+
+## Quick Troubleshooting
+
+- If you change Python code under [`adapter/`](/home/tupolev/llm-stack/adapter), rebuild and restart `adapter`.
+- If you change the proxy config, reload Caddy.
+- If an API key stops working, check `API_KEY_SECRET`, `API_KEY_SALT`, and `data/auth.db` first.
+- If a tool behaves incorrectly from a client, test the direct endpoint under `/v1/tools/...` first.
+- If an agent fails and you are not sure whether the problem is the client or the stack, run `e2e.sh`.
+
+## Uninstall
 
 ```bash
 sudo systemctl stop llm-stack
 sudo systemctl disable llm-stack
 sudo rm -rf /opt/llm-stack
 ```
-
----
-
-# 🏁 Status
-
-```
-✔ Fully local LLM stack
-✔ OpenAI-compatible API
-✔ TLS reverse proxy
-✔ Observability (Prometheus + Grafana)
-✔ Auto-start on boot
-✔ Warmed models
-✔ Production-ready
-```
-
----
-
-# 🧑‍💻 Notes
-
-Designed for:
-
-* Local development
-* Private AI infra
-* Self-hosted LLM serving
-* High-control environments
-
----
-
-Si quieres el siguiente salto natural ahora mismo sería:
-
-👉 convertir esto en un **installer tipo producto (CLI + config + upgrades)** o
-👉 añadir **multi-model routing + fallback automático** 😏

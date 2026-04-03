@@ -73,22 +73,16 @@ If that works, the CLI is installed correctly.
 
 ## Step 3: Prepare a Project Folder
 
-If you want OpenCode to work on this repository, open the repo root:
+If you want OpenCode to work on this repository, open the project root:
 
 ```bash
-cd /path/to/llm-stack
+cd /path/to/project-root
 ```
 
-On WSL, that might look like:
+In this project, the runtime stack lives under:
 
 ```bash
-cd /mnt/c/Users/your-user/path/to/llm-stack
-```
-
-or, if the repo is already inside Linux:
-
-```bash
-cd ~/llm-stack
+./llm-stack
 ```
 
 ## Step 4: Create an API Key for the NUC Adapter
@@ -101,7 +95,7 @@ You will use that key in OpenCode as the credential for the custom provider.
 
 ## Step 5: Create a Project OpenCode Config
 
-Create a file named `opencode.json` in the root of the project.
+Create a file named `opencode.json` in the project root.
 
 Use this configuration:
 
@@ -136,7 +130,7 @@ What this does:
 - tells OpenCode to use the OpenAI-compatible adapter running at `https://nuc.fritz.box/v1`
 - reads the API key from the local environment variable `NUC_API_KEY`
 - sets the main model to `qwen2.5-coder:7b`
-- loads [`PRD.md`](/home/tupolev/llm-stack/PRD.md) as project instructions/context
+- loads [`PRD.md`](/home/tupolev/PRD.md) as project instructions/context
 
 ## Step 6: Export the API Key on the Client Machine
 
@@ -204,11 +198,11 @@ Once OpenCode is running in the repo, you can ask it to inspect files and write 
 Examples:
 
 ```text
-Read README.md and PRD.md, then propose a small improvement to adapter/app.py to make weather tool errors easier to debug.
+Read README.md and PRD.md, then propose a small improvement to llm-stack/adapter/app.py to make weather tool errors easier to debug.
 ```
 
 ```text
-Inspect adapter/app.py and add a new tool endpoint for exchange rates. Update README.md and PRD.md too.
+Inspect llm-stack/adapter/app.py and add a new tool endpoint for exchange rates. Update README.md and PRD.md too.
 ```
 
 ```text
@@ -216,7 +210,7 @@ Search the repo for auth.db usage and explain the current API key verification f
 ```
 
 ```text
-Generate a new Python module for validating HTTP tool arguments and integrate it into adapter/app.py.
+Generate a new Python module for validating HTTP tool arguments and integrate it into llm-stack/adapter/app.py.
 ```
 
 ## Step 11: Good Prompting Patterns for This Project
@@ -300,18 +294,19 @@ That is expected sometimes. The adapter tries Google first in auto mode and may 
 
 Make sure:
 
-- you started OpenCode in the repository root
+- you started OpenCode in the project root
 - the files are writable
 - the prompt clearly says whether you want analysis only or real code changes
 
 ## Recommended Workflow for This Repository
 
-1. Start OpenCode in the repo root.
+1. Start OpenCode in the project root.
 2. Make sure `PRD.md` is available and referenced in `opencode.json`.
 3. Ask OpenCode to inspect before editing.
-4. After Python changes under `adapter/`, rebuild the adapter:
+4. After Python changes under `llm-stack/adapter/`, rebuild the adapter:
 
 ```bash
+cd /home/tupolev/llm-stack
 docker compose build adapter
 docker compose up -d adapter
 ```
@@ -319,6 +314,7 @@ docker compose up -d adapter
 5. If proxy routes changed, reload Caddy:
 
 ```bash
+cd /home/tupolev/llm-stack
 docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
 ```
 
@@ -338,10 +334,10 @@ If you only want the shortest working path:
 curl -fsSL https://opencode.ai/install | bash
 ```
 
-2. Go to the repo:
+2. Go to the project root:
 
 ```bash
-cd /path/to/llm-stack
+cd /path/to/project-root
 ```
 
 3. Create `opencode.json` with the config shown above.
@@ -367,5 +363,5 @@ Use web_search to find the latest information about OpenAI-compatible coding age
 7. Ask:
 
 ```text
-Inspect adapter/app.py and generate a patch to improve error handling in one tool.
+Inspect llm-stack/adapter/app.py and generate a patch to improve error handling in one tool.
 ```
