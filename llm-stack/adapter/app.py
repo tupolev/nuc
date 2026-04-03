@@ -11,6 +11,15 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+from auth_security import (
+    API_KEY_SALT_ENV,
+    API_KEY_SECRET_ENV,
+    derive_api_key_hash,
+    ensure_api_keys_schema,
+    get_required_env,
+    migrate_legacy_plaintext_keys,
+)
+
 app = FastAPI()
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
@@ -35,11 +44,13 @@ os.makedirs(os.path.dirname(AUTH_DB_PATH), exist_ok=True)
 os.makedirs(FILES_DIR, exist_ok=True)
 
 conn = sqlite3.connect(AUTH_DB_PATH, check_same_thread=False)
+ensure_api_keys_schema(conn)
 
 
 def get_api_key_priority(token: str) -> Optional[str]:
+    key_hash = derive_api_key_hash(token)
     cur = conn.cursor()
-    cur.execute("SELECT priority FROM api_keys WHERE key = ?", (token,))
+    cur.execute("SELECT priority FROM api_keys WHERE key_hash = ?", (key_hash,))
     row = cur.fetchone()
     return row[0] if row else None
 
@@ -861,6 +872,9 @@ async def embed_scheduler():
 
 @app.on_event("startup")
 async def startup():
+    get_required_env(API_KEY_SECRET_ENV)
+    get_required_env(API_KEY_SALT_ENV)
+    migrate_legacy_plaintext_keys(conn)
     asyncio.create_task(chat_scheduler())
     asyncio.create_task(embed_scheduler())
 

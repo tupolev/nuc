@@ -2,7 +2,6 @@ services:
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
-#    container_name: open-webui
     restart: always
     ports:
       - "8080:8080"
@@ -21,7 +20,6 @@ services:
 
   caddy:
     image: caddy:latest
-#    container_name: caddy
     restart: always
     ports:
       - "80:80"
@@ -33,25 +31,11 @@ services:
 
   adapter:
     build: ./adapter
-#    container_name: ollama-adapter
+    env_file:
+      - .env
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
-    environment:
-      - OLLAMA_URL=http://host.docker.internal:11434
-      - FILES_DIR=/data/files
-      - AUTH_DB_PATH=/data/auth.db
-      - CHAT_CONCURRENCY=2
-      - EMBED_CONCURRENCY=1
-      - QUEUE_TIMEOUT=30
-      - TOOL_MAX_ITERATIONS=8
-      - TOOL_ARG_MAX_LEN=50000
-      - TOOL_OUTPUT_MAX_LEN=100000
-      - PYTHON_TIMEOUT=30
-      - PYTHON_CODE_MAX_LEN=12000
-      - DEFAULT_MODEL=qwen2.5-coder:7b
-      - TOOL_EXECUTION_MODE=server
-      - AUTO_ENABLE_LOCAL_TOOLS=false
     volumes:
       - ./data:/data
     ports:
@@ -59,7 +43,6 @@ services:
 
   prometheus:
     image: prom/prometheus
- #   container_name: prometheus
     restart: always
     ports:
       - "9090:9090"
@@ -72,7 +55,6 @@ services:
 
   node-exporter:
     image: prom/node-exporter:latest
-  #  container_name: node-exporter
     restart: unless-stopped
     network_mode: host
     pid: host
@@ -84,14 +66,12 @@ services:
 
   ollama-exporter:
     build: ./ollama-exporter
-   # container_name: ollama-exporter
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
   grafana:
     image: grafana/grafana:latest
-    #container_name: grafana
     restart: unless-stopped
     ports:
       - "3001:3000"

@@ -7,6 +7,7 @@ Stack local con:
 - Open WebUI detrás de Caddy
 - Prometheus + Grafana
 - SQLite para API keys y prioridades
+- Almacenamiento protegido de API keys con secreto y salt
 
 ## Arquitectura
 
@@ -68,6 +69,8 @@ El adapter lee estas variables:
 - `OLLAMA_URL`
 - `FILES_DIR`
 - `AUTH_DB_PATH`
+- `API_KEY_SECRET`
+- `API_KEY_SALT`
 - `CHAT_CONCURRENCY`
 - `EMBED_CONCURRENCY`
 - `QUEUE_TIMEOUT`
@@ -81,8 +84,22 @@ El adapter lee estas variables:
 - `AUTO_ENABLE_LOCAL_TOOLS`
 
 Hay una plantilla en [.env.example](/home/tupolev/llm-stack/.env.example).
+El fichero real `.env` debe existir localmente y no se sube a git.
 
 ## API keys
+
+Las API keys ya no deben almacenarse en claro. El adapter deriva un valor determinista protegido a partir de:
+
+- `API_KEY_SECRET`
+- `API_KEY_SALT`
+
+Ese valor derivado es el que se guarda en SQLite y el que se usa para lookup en cada request.
+
+La consecuencia práctica es:
+
+- la base no contiene la API key original
+- el adapter necesita esas dos variables de entorno para validar requests
+- si cambias `API_KEY_SECRET` o `API_KEY_SALT`, las keys ya almacenadas dejarán de coincidir hasta que las recrees o migres con los mismos valores
 
 Base de datos: `data/auth.db`
 
@@ -90,17 +107,31 @@ Tabla:
 
 ```sql
 CREATE TABLE api_keys (
-  key TEXT PRIMARY KEY,
-  priority TEXT
+  key_hash TEXT PRIMARY KEY,
+  priority TEXT NOT NULL
 );
 ```
 
-Ejemplos:
+Crear una key nueva de forma interactiva:
 
-```sql
-INSERT INTO api_keys VALUES ('maravillas123', 'medium');
-INSERT INTO api_keys VALUES ('admin123', 'high');
-INSERT INTO api_keys VALUES ('batch123', 'low');
+```bash
+cd /home/tupolev/llm-stack
+export AUTH_DB_PATH=/home/tupolev/llm-stack/data/auth.db
+export API_KEY_SECRET='cambia-esto'
+export API_KEY_SALT='cambia-esto-tambien'
+python3 adapter/manage_api_keys.py create --priority high
+```
+
+Listar hashes almacenados:
+
+```bash
+python3 adapter/manage_api_keys.py list
+```
+
+Migrar una base antigua que todavía tenga la columna `key` en claro:
+
+```bash
+python3 adapter/manage_api_keys.py migrate-legacy
 ```
 
 ## Uso rápido
@@ -108,6 +139,8 @@ INSERT INTO api_keys VALUES ('batch123', 'low');
 Levantar toda la pila:
 
 ```bash
+cp .env.example .env
+# editar .env con valores reales
 docker compose up -d
 ```
 
@@ -123,6 +156,11 @@ Recargar Caddy cuando cambie `Caddyfile`:
 ```bash
 docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
 ```
+
+Notas sobre configuración:
+
+- el servicio `adapter` carga `.env` mediante `env_file`
+- `.env.example` es solo plantilla; el `.env` real debe contener los secretos
 
 ## Ejemplos de API
 
@@ -240,3 +278,4 @@ Summary: total=6 ok=6 fail=0
 - Open WebUI no expone la API OpenAI-compatible de esta pila; esa la sirve el `adapter`.
 - Prometheus y Grafana están pensados principalmente para tráfico interno de la propia pila.
 - Si cambias rutas públicas del adapter, probablemente tendrás que ajustar también `Caddyfile`.
+- Si cambias `API_KEY_SECRET` o `API_KEY_SALT`, tendrás que recrear o migrar las API keys con esos mismos valores.
