@@ -1,31 +1,39 @@
 # Local LLM Stack
 
-Stack local para un NUC con:
+Local NUC stack with:
 
-- Ollama en el host
-- adapter FastAPI con API compatible con OpenAI
-- Open WebUI detrás de Caddy
-- Prometheus y Grafana
-- SQLite para API keys y prioridades
+- Ollama on the host
+- a FastAPI adapter exposing an OpenAI-compatible API
+- Open WebUI behind Caddy
+- Prometheus and Grafana
+- SQLite for API keys and priorities
 
-Este documento está pensado para la persona que instala, configura y opera el proyecto.
-Si lo que necesitas es contexto profundo para un agente de IA, consulta [`PRD.md`](/home/tupolev/llm-stack/PRD.md).
+This document is for the human operator who installs, configures, and runs the project.
+If you need deeper technical context for an AI agent, see [`PRD.md`](/home/tupolev/llm-stack/PRD.md).
 
-## Qué hace
+## What It Does
 
-La pila expone una API tipo OpenAI para clientes y agentes, una interfaz web con Open WebUI y métricas locales para observabilidad.
+The stack exposes an OpenAI-style API for clients and agents, a browser UI through Open WebUI, and local observability through metrics.
 
-Rutas principales:
+The adapter is now modularized for maintainability:
+
+- [`app.py`](/home/tupolev/llm-stack/adapter/app.py): FastAPI composition and routes
+- [`config.py`](/home/tupolev/llm-stack/adapter/config.py): environment variables and constants
+- [`state.py`](/home/tupolev/llm-stack/adapter/state.py): auth DB, queues, and metrics
+- [`tooling.py`](/home/tupolev/llm-stack/adapter/tooling.py): tools and tool registry
+- [`openai_compat.py`](/home/tupolev/llm-stack/adapter/openai_compat.py): OpenAI/Ollama compatibility and tool calling
+
+Main routes:
 
 - `https://nuc.fritz.box/v1/...` -> adapter
 - `https://nuc.fritz.box/` -> Open WebUI
-- `https://nuc.fritz.box/metrics` -> métricas JSON del adapter
-- `https://nuc.fritz.box/metrics/prometheus` -> métricas Prometheus del adapter
+- `https://nuc.fritz.box/metrics` -> adapter JSON metrics
+- `https://nuc.fritz.box/metrics/prometheus` -> adapter Prometheus metrics
 
-## Arquitectura
+## Architecture
 
 ```text
-Cliente
+Client
   -> Caddy
     -> /v1/* -> adapter:4000
     -> /metrics -> adapter:4000
@@ -33,7 +41,7 @@ Cliente
     -> /* -> open-webui:8080
 
 adapter
-  -> Ollama en host.docker.internal:11434
+  -> Ollama on host.docker.internal:11434
   -> /data/auth.db
   -> /data/files
 
@@ -43,25 +51,25 @@ Prometheus
   -> scrape host.docker.internal:9100
 ```
 
-## Requisitos
+## Requirements
 
-- Docker y Docker Compose
-- Ollama accesible desde el host
-- certificados y configuración de Caddy válidos para `nuc.fritz.box`
-- un fichero `.env` local con los valores reales
+- Docker and Docker Compose
+- Ollama reachable from the host
+- valid Caddy certificates and config for `nuc.fritz.box`
+- a local `.env` file with real values
 
-## Configuración
+## Configuration
 
-Hay una plantilla en [` .env.example `](/home/tupolev/llm-stack/.env.example).
+A template is available in [` .env.example `](/home/tupolev/llm-stack/.env.example).
 
-Preparación inicial:
+Initial setup:
 
 ```bash
 cd /home/tupolev/llm-stack
 cp .env.example .env
 ```
 
-Después edita `.env` y rellena al menos:
+Then edit `.env` and fill in at least:
 
 - `OLLAMA_URL`
 - `AUTH_DB_PATH`
@@ -70,20 +78,20 @@ Después edita `.env` y rellena al menos:
 - `API_KEY_SALT`
 - `DEFAULT_MODEL`
 
-Notas importantes:
+Important notes:
 
-- `.env` no debe subirse a git
-- `adapter` carga su configuración usando `env_file`
-- si cambias `API_KEY_SECRET` o `API_KEY_SALT`, las API keys ya creadas dejarán de coincidir
+- `.env` must not be committed to git
+- the `adapter` service loads its configuration through `env_file`
+- if you change `API_KEY_SECRET` or `API_KEY_SALT`, existing API keys will stop matching
 
-## Levantar la pila
+## Start the Stack
 
 ```bash
 cd /home/tupolev/llm-stack
 docker compose up -d
 ```
 
-Servicios principales:
+Main services:
 
 - `adapter`
 - `open-webui`
@@ -93,9 +101,9 @@ Servicios principales:
 - `ollama-exporter`
 - `node-exporter`
 
-## Operación habitual
+## Day-to-Day Operations
 
-Reconstruir el adapter tras cambios en Python:
+Rebuild the adapter after Python changes:
 
 ```bash
 cd /home/tupolev/llm-stack
@@ -103,33 +111,35 @@ docker compose build adapter
 docker compose up -d adapter
 ```
 
-Recargar Caddy tras cambios en [`Caddyfile`](/home/tupolev/llm-stack/Caddyfile):
+This applies if you change [`app.py`](/home/tupolev/llm-stack/adapter/app.py) or any other Python module under [`adapter/`](/home/tupolev/llm-stack/adapter).
+
+Reload Caddy after changes to [`Caddyfile`](/home/tupolev/llm-stack/Caddyfile):
 
 ```bash
 cd /home/tupolev/llm-stack
 docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
 ```
 
-Ver el estado de los servicios:
+Check service status:
 
 ```bash
 docker compose ps
 ```
 
-Ver logs del adapter:
+View adapter logs:
 
 ```bash
 docker compose logs -f adapter
 ```
 
-## API keys
+## API Keys
 
-Las API keys no se almacenan en claro. El adapter guarda un `key_hash` derivado a partir de:
+API keys are not stored in plaintext. The adapter stores a derived `key_hash` built from:
 
 - `API_KEY_SECRET`
 - `API_KEY_SALT`
 
-La base de datos esperada es `data/auth.db` y la tabla es:
+The expected database is `data/auth.db` and the table is:
 
 ```sql
 CREATE TABLE api_keys (
@@ -138,50 +148,50 @@ CREATE TABLE api_keys (
 );
 ```
 
-Crear una API key nueva:
+Create a new API key:
 
 ```bash
 cd /home/tupolev/llm-stack
 export AUTH_DB_PATH=/home/tupolev/llm-stack/data/auth.db
-export API_KEY_SECRET='cambia-esto'
-export API_KEY_SALT='cambia-esto-tambien'
+export API_KEY_SECRET='change-this'
+export API_KEY_SALT='change-this-too'
 python3 adapter/manage_api_keys.py create --priority high
 ```
 
-Listar las keys almacenadas:
+List stored keys:
 
 ```bash
 python3 adapter/manage_api_keys.py list
 ```
 
-Migrar una base antigua con columna `key` en claro:
+Migrate an older database that still has a plaintext `key` column:
 
 ```bash
 python3 adapter/manage_api_keys.py migrate-legacy
 ```
 
-## Endpoints útiles
+## Useful Endpoints
 
-- API directa del adapter: `http://localhost:4000`
-- API vía Caddy: `https://nuc.fritz.box/v1/...`
+- Direct adapter API: `http://localhost:4000`
+- API through Caddy: `https://nuc.fritz.box/v1/...`
 - Open WebUI: `https://nuc.fritz.box/`
 - Prometheus UI: `http://localhost:9090`
 - Grafana: `http://localhost:3001`
 
-## Ejemplos rápidos
+## Quick Examples
 
-Listar modelos:
+List models:
 
 ```bash
 curl http://localhost:4000/v1/models \
-  -H "Authorization: Bearer TU_API_KEY"
+  -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
-Chat simple:
+Simple chat:
 
 ```bash
 curl http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer TU_API_KEY" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "qwen2.5-coder:7b",
@@ -191,11 +201,11 @@ curl http://localhost:4000/v1/chat/completions \
   }'
 ```
 
-Streaming:
+Streaming chat:
 
 ```bash
 curl -N http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer TU_API_KEY" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "qwen2.5-coder:7b",
@@ -206,34 +216,34 @@ curl -N http://localhost:4000/v1/chat/completions \
   }'
 ```
 
-## Validación end-to-end
+## End-to-End Validation
 
-El script recomendado es [`/home/tupolev/e2e.sh`](/home/tupolev/e2e.sh).
+The recommended validation script is [`/home/tupolev/e2e.sh`](/home/tupolev/e2e.sh).
 
-Está pensado para ejecutarse desde la máquina cliente donde corre el agente, no desde el NUC, y solo necesita:
+It is meant to run from the client machine where the agent runs, not from the NUC itself, and it only needs:
 
 - `BASE_URL`
 - `API_KEY`
 
-Ejemplo:
+Example:
 
 ```bash
-BASE_URL="https://nuc.fritz.box" API_KEY="TU_API_KEY" bash /home/tupolev/e2e.sh -vv
+BASE_URL="https://nuc.fritz.box" API_KEY="YOUR_API_KEY" bash /home/tupolev/e2e.sh -vv
 ```
 
-## Qué incluye hoy el adapter
+## What the Adapter Currently Includes
 
-Capacidades principales:
+Main capabilities:
 
 - chat completions
 - embeddings
 - model listing
-- tools OpenAI-style
-- streaming SSE
-- modo `server` y modo `client` para tools
-- métricas JSON y Prometheus
+- OpenAI-style tools
+- SSE streaming
+- `server` and `client` tool modes
+- JSON and Prometheus metrics
 
-Tools disponibles:
+Available tools:
 
 - `web_search`
 - `python`
@@ -249,10 +259,10 @@ Tools disponibles:
 - `shell_safe`
 - `calendar_events`
 
-## Troubleshooting rápido
+## Quick Troubleshooting
 
-- Si cambias código en `adapter/app.py`, reconstruye y reinicia `adapter`.
-- Si cambias el proxy, recarga Caddy.
-- Si una API key deja de funcionar, revisa primero `API_KEY_SECRET`, `API_KEY_SALT` y `data/auth.db`.
-- Si una tool funciona mal desde un cliente, prueba antes el endpoint directo en `/v1/tools/...`.
-- Si el agente falla y no sabes si es problema del cliente o del stack, ejecuta `e2e.sh`.
+- If you change Python code under [`adapter/`](/home/tupolev/llm-stack/adapter), rebuild and restart `adapter`.
+- If you change the proxy config, reload Caddy.
+- If an API key stops working, check `API_KEY_SECRET`, `API_KEY_SALT`, and `data/auth.db` first.
+- If a tool behaves incorrectly from a client, test the direct endpoint under `/v1/tools/...` first.
+- If an agent fails and you are not sure whether the problem is the client or the stack, run `e2e.sh`.

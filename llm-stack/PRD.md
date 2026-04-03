@@ -106,7 +106,11 @@ Key files and folders:
 - [`docker-compose.yml`](/home/tupolev/llm-stack/docker-compose.yml): orchestrates the stack
 - [`Caddyfile`](/home/tupolev/llm-stack/Caddyfile): HTTPS reverse proxy and route mapping
 - [`README.md`](/home/tupolev/llm-stack/README.md): operator-facing quick reference
-- [`adapter/app.py`](/home/tupolev/llm-stack/adapter/app.py): core adapter implementation
+- [`adapter/app.py`](/home/tupolev/llm-stack/adapter/app.py): FastAPI composition, middleware, schedulers, and HTTP routes
+- [`adapter/config.py`](/home/tupolev/llm-stack/adapter/config.py): runtime configuration and environment-derived constants
+- [`adapter/state.py`](/home/tupolev/llm-stack/adapter/state.py): shared process state, auth DB connection, queues, and metrics
+- [`adapter/tooling.py`](/home/tupolev/llm-stack/adapter/tooling.py): tool handlers, schema validation, direct tool execution, and tool registry
+- [`adapter/openai_compat.py`](/home/tupolev/llm-stack/adapter/openai_compat.py): OpenAI/Ollama normalization, tool-call extraction, response shaping, and tool orchestration
 - [`adapter/auth_security.py`](/home/tupolev/llm-stack/adapter/auth_security.py): API-key hashing, schema helpers, env requirements
 - [`adapter/manage_api_keys.py`](/home/tupolev/llm-stack/adapter/manage_api_keys.py): CLI for managing protected API keys
 - [`adapter/Dockerfile`](/home/tupolev/llm-stack/adapter/Dockerfile): adapter image build
@@ -131,6 +135,16 @@ The adapter is the system’s control plane. It is responsible for:
 - queueing and priority handling
 - API key authorization
 - metrics
+
+Current internal module split:
+
+- `app.py`: entrypoint and route layer
+- `config.py`: configuration constants
+- `state.py`: DB connection, queues, counters, and shared metrics
+- `tooling.py`: tool handlers and registry
+- `openai_compat.py`: OpenAI-compatible request/response translation and tool loop logic
+
+This split is intentional and should be preserved. New changes should usually land in one of these modules rather than growing `app.py` again.
 
 ### Open WebUI
 
@@ -477,6 +491,11 @@ The script now checks:
 - unauthorized access rejection
 - Prometheus metrics
 
+Current validation status:
+
+- after the modular refactor of the adapter, the external black-box `e2e.sh` still passes end-to-end against `https://nuc.fritz.box`
+- last validated result: `Summary: total=18 ok=18 fail=0`
+
 Typical usage:
 
 ```bash
@@ -516,10 +535,11 @@ If you are an agent starting work in this repository, the safest default workflo
 
 1. Read [`README.md`](/home/tupolev/llm-stack/README.md) and this document.
 2. Inspect [`adapter/app.py`](/home/tupolev/llm-stack/adapter/app.py) before making assumptions.
-3. Check whether your task touches runtime code, proxy config, docs, or deployment config.
-4. If you modify adapter Python code, rebuild and restart `adapter`.
-5. If you modify Caddy routes, reload Caddy.
-6. Run [`/home/tupolev/e2e.sh`](/home/tupolev/e2e.sh) when possible.
-7. Do not overwrite or rotate `API_KEY_SECRET` or `API_KEY_SALT` casually, or existing API keys will stop working.
+3. Inspect the modular adapter layout as a whole, especially [`config.py`](/home/tupolev/llm-stack/adapter/config.py), [`state.py`](/home/tupolev/llm-stack/adapter/state.py), [`tooling.py`](/home/tupolev/llm-stack/adapter/tooling.py), and [`openai_compat.py`](/home/tupolev/llm-stack/adapter/openai_compat.py), before moving code around.
+4. Check whether your task touches runtime code, proxy config, docs, or deployment config.
+5. If you modify adapter Python code anywhere under [`adapter/`](/home/tupolev/llm-stack/adapter), rebuild and restart `adapter`.
+6. If you modify Caddy routes, reload Caddy.
+7. Run [`/home/tupolev/e2e.sh`](/home/tupolev/e2e.sh) when possible.
+8. Do not overwrite or rotate `API_KEY_SECRET` or `API_KEY_SALT` casually, or existing API keys will stop working.
 
 This project is intentionally pragmatic: local-first, agent-friendly, and optimized for usefulness over polish.
