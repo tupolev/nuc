@@ -23,7 +23,7 @@ HTTP_MAX_BYTES = int(os.getenv("HTTP_MAX_BYTES", "300000"))
 SQLITE_QUERY_MAX_ROWS = int(os.getenv("SQLITE_QUERY_MAX_ROWS", "200"))
 SHELL_TIMEOUT = int(os.getenv("SHELL_TIMEOUT", "20"))
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen2.5-coder:7b")
-TOOL_EXECUTION_MODE = os.getenv("TOOL_EXECUTION_MODE", "server").strip().lower()
+TOOL_EXECUTION_MODE = os.getenv("TOOL_EXECUTION_MODE", "client").strip().lower()
 AUTO_ENABLE_LOCAL_TOOLS = os.getenv("AUTO_ENABLE_LOCAL_TOOLS", "false").strip().lower() == "true"
 SAFE_SHELL_COMMANDS = {
     item.strip()

@@ -20,6 +20,10 @@ The stack exposes:
 - a browser UI through Open WebUI
 - local JSON and Prometheus metrics
 - priority-aware scheduling for chat and embeddings
+- OpenAI-style tool calling with client-side execution as the safe default
+- workspace-aware file and command tools for agentic coding workflows
+- browser-oriented tools for web search and document extraction
+- PHP-oriented command support for legacy and modern projects
 
 The adapter is modularized for maintainability:
 
@@ -43,6 +47,7 @@ adapter
   -> Ollama on host.docker.internal:11434
   -> /data/auth.db
   -> /data/files
+  -> /workspace
 
 Prometheus
   -> scrape adapter:4000/metrics/prometheus
@@ -101,12 +106,27 @@ Then edit `.env` and fill in at least:
 - `API_KEY_SECRET`
 - `API_KEY_SALT`
 - `DEFAULT_MODEL`
+- `TOOL_EXECUTION_MODE`
+- `AUTO_ENABLE_LOCAL_TOOLS`
 
 Important notes:
 
 - `.env` must not be committed to git
 - the `adapter` service loads its configuration through `env_file`
 - if you change `API_KEY_SECRET` or `API_KEY_SALT`, existing API keys will stop matching
+- the safe default is `TOOL_EXECUTION_MODE=client`
+- keep `AUTO_ENABLE_LOCAL_TOOLS=false` unless you intentionally want server-side tool execution
+
+## Tool Execution Safety
+
+The adapter is now biased toward client-side tool execution.
+
+- by default, tools declared by the client are returned to the client for execution
+- this is the correct behavior when the coding agent runs on the user's machine
+- local server tools are only auto-enabled when a request explicitly asks for `tool_execution_mode=server`
+- name collisions are handled safely in `client` mode: if the client exposes a tool called `write_file`, that call is returned to the client instead of being executed on the server
+
+This prevents the adapter from writing code files on the NUC when the real workspace lives on the client machine.
 
 ## Start the Stack
 
@@ -358,6 +378,10 @@ Example:
 BASE_URL="https://nuc.fritz.box" API_KEY="YOUR_API_KEY" bash /home/tupolev/e2e.sh -vv
 ```
 
+Current status:
+
+- `56/56` checks passing
+
 ## Current Features
 
 - OpenAI-compatible chat completions
@@ -372,6 +396,9 @@ BASE_URL="https://nuc.fritz.box" API_KEY="YOUR_API_KEY" bash /home/tupolev/e2e.s
 - concurrency control
 - queue timeout
 - local tools for live information and utility actions
+- workspace-mounted agentic coding support
+- browser extraction tools
+- PHP command/runtime support
 
 Available tools:
 
@@ -388,6 +415,31 @@ Available tools:
 - `sqlite_query`
 - `shell_safe`
 - `calendar_events`
+- `list_files`
+- `read_file`
+- `write_file`
+- `patch_file`
+- `mkdir`
+- `exec_command`
+- `browser_search`
+- `browser_open`
+- `browser_extract`
+- `browser_screenshot`
+
+PHP-oriented command support is also available through `exec_command`, including:
+
+- `php`
+- `composer`
+- `phar`
+- `phpunit`
+- `phpcs`
+- `phpcbf`
+- `phpstan`
+- `php-cs-fixer`
+- `artisan`
+- `bin/console`
+- `apache2ctl`
+- `nginx`
 
 ## Scheduler Notes
 
@@ -410,6 +462,13 @@ Available tools:
 - If an API key stops working, check `API_KEY_SECRET`, `API_KEY_SALT`, and `data/auth.db` first.
 - If a tool behaves incorrectly from a client, test the direct endpoint under `/v1/tools/...` first.
 - If an agent fails and you are not sure whether the problem is the client or the stack, run `e2e.sh`.
+- If a coding agent writes files on the server instead of the client, check that the request is using `client` mode and that server-side tools were not explicitly opted in.
+
+## Additional Documentation
+
+- Stack-level adapter notes: [`llm-stack/README.md`](/home/tupolev/llm-stack/README.md)
+- Agent implementation roadmap: [`llm-stack/AGENT_AUTONOMY_ROADMAP.md`](/home/tupolev/llm-stack/AGENT_AUTONOMY_ROADMAP.md)
+- Bootstrap recipes: [`llm-stack/BOOTSTRAP_RECIPES.md`](/home/tupolev/llm-stack/BOOTSTRAP_RECIPES.md)
 
 ## Uninstall
 

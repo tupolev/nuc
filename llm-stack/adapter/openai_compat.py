@@ -101,21 +101,24 @@ def normalize_passthrough_openai_tools(tools: Optional[List[Dict[str, Any]]]) ->
     return normalized
 
 
-def build_effective_tools(requested_tools: Any, legacy_functions: Any, execution_mode: str) -> List[Dict[str, Any]]:
+def build_effective_tools(
+    requested_tools: Any,
+    legacy_functions: Any,
+    execution_mode: str,
+    allow_auto_server_tools: bool = False,
+) -> List[Dict[str, Any]]:
     candidate_tools = requested_tools or []
     if not candidate_tools and legacy_functions:
         candidate_tools = convert_legacy_functions_to_tools(legacy_functions)
 
     if execution_mode == "client":
-        normalized = normalize_passthrough_openai_tools(candidate_tools)
-        if normalized:
-            return normalized
+        return normalize_passthrough_openai_tools(candidate_tools)
 
     normalized = normalize_local_openai_tools(candidate_tools)
     if normalized:
         return normalized
 
-    if execution_mode == "server" and AUTO_ENABLE_LOCAL_TOOLS:
+    if execution_mode == "server" and allow_auto_server_tools and AUTO_ENABLE_LOCAL_TOOLS:
         return build_all_tool_specs()
 
     return []
@@ -149,7 +152,11 @@ def build_tool_system_message(tool_choice: Optional[Dict[str, Any]] = None) -> D
         "Only call a tool when it is necessary to answer accurately or perform the requested action. "
         "If you call a tool, produce valid tool calls with arguments matching the provided JSON schema. "
         "Never serialize tool calls as plain JSON text in message content. "
-        "Do not invent tool results. After tool results are provided, continue and produce the final answer."
+        "Do not invent tool results. After tool results are provided, continue and produce the final answer.\n"
+        "IMPORTANT — file operations: if the user asks you to create, modify, or save a file, "
+        "you MUST call the write_file or patch_file tool to actually perform the operation. "
+        "Describing a plan to write a file is NOT the same as writing it. "
+        "ALWAYS execute the tool call that performs the action the user requested."
     )
     if tool_choice and tool_choice.get("mode") == "forced" and tool_choice.get("forced_name"):
         base_content += f" You must call the tool '{tool_choice['forced_name']}' before giving the final answer."
@@ -537,6 +544,7 @@ async def run_chat_with_native_tools(
     tool_choice: Optional[Dict[str, Any]] = None,
     execution_mode: str = "server",
     max_iterations: int = TOOL_MAX_ITERATIONS,
+    request_id: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], int, str]:
     async with httpx.AsyncClient(timeout=180.0) as client:
         history = list(messages)
@@ -624,7 +632,7 @@ async def run_chat_with_native_tools(
                     bump_tool_status_metric(tool_name, "duplicate_blocked")
                     tool_result = {"error": "duplicate tool call blocked to prevent infinite loop"}
                 else:
-                    tool_result = await execute_tool_call(tool_name, tool_args)
+                    tool_result = await execute_tool_call(tool_name, tool_args, request_id)
 
                 history.append(
                     {

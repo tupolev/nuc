@@ -419,7 +419,50 @@ JSON
   fi
 fi
 
-# 6) Tools catalog
+# 6) Tools client mode with colliding write_file passthrough
+TOTAL=$((TOTAL + 1))
+PAYLOAD_CLIENT_COLLISION=$(cat <<JSON
+{
+  "model": "$MODEL",
+  "tool_execution_mode": "client",
+  "tool_choice": "required",
+  "tools": [
+    {"type":"function","function":{"name":"write_file","description":"Client-side file writer","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}}
+  ],
+  "messages": [{"role":"user","content":"Write hello.txt with hello from the client tool."}]
+}
+JSON
+)
+
+raw_collision=$(curl -k -sS "$BASE_URL/v1/chat/completions" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$PAYLOAD_CLIENT_COLLISION" \
+  -w '\nHTTP_STATUS:%{http_code}\n') || {
+    fail "Tools client mode collision passthrough" "network/curl error"
+    raw_collision=""
+  }
+
+if [[ -n "${raw_collision:-}" ]]; then
+  status=$(echo "$raw_collision" | awk -F: '/^HTTP_STATUS:/{print $2}' | tail -n1)
+  collision_body=$(echo "$raw_collision" | sed '/^HTTP_STATUS:/d')
+
+  if [[ $VERBOSE -eq 1 ]]; then
+    echo
+    echo "--- RESPONSE: Tools client mode collision passthrough (HTTP $status) ---"
+    echo "$collision_body" | jq . 2>/dev/null || echo "$collision_body"
+  fi
+
+  if [[ "$status" != "200" ]]; then
+    fail "Tools client mode collision passthrough" "HTTP $status"
+  elif echo "$collision_body" | jq -e '.choices[0].finish_reason == "tool_calls" and (.choices[0].message.tool_calls[0].function.name == "write_file")' >/dev/null 2>&1; then
+    pass "Tools client mode collision passthrough"
+  else
+    fail "Tools client mode collision passthrough" "adapter did not return client-side write_file tool call"
+  fi
+fi
+
+# 7) Tools catalog
 run_get_test \
   "Tools catalog" \
   "/v1/tools" \
@@ -437,105 +480,105 @@ run_get_test \
     and (map(.function.name) | index("mkdir")) != null
     and (map(.function.name) | index("exec_command")) != null'
 
-# 7) Workspace mkdir
+# 8) Workspace mkdir
 run_json_test \
   "Workspace mkdir" \
   "/v1/tools/mkdir" \
   "{\"path\":\"${WORKSPACE_PREFIX}\",\"parents\":true}" \
   '.path == "'"${WORKSPACE_PREFIX}"'" and (.created | type == "boolean")'
 
-# 8) Workspace write file
+# 9) Workspace write file
 run_json_test \
   "Workspace write file" \
   "/v1/tools/write_file" \
   "{\"path\":\"${WORKSPACE_PREFIX}/notes.txt\",\"content\":\"hello\\nworld\\n\",\"create_dirs\":true}" \
   ".path == \"${WORKSPACE_PREFIX}/notes.txt\" and .bytes_written > 0"
 
-# 9) Workspace read file
+# 10) Workspace read file
 run_json_test \
   "Workspace read file" \
   "/v1/tools/read_file" \
   "{\"path\":\"${WORKSPACE_PREFIX}/notes.txt\"}" \
   ".path == \"${WORKSPACE_PREFIX}/notes.txt\" and (.content | contains(\"hello\"))"
 
-# 10) Workspace patch file
+# 11) Workspace patch file
 run_json_test \
   "Workspace patch file" \
   "/v1/tools/patch_file" \
   "{\"path\":\"${WORKSPACE_PREFIX}/notes.txt\",\"old_text\":\"world\",\"new_text\":\"agent\",\"replace_all\":false}" \
   ".path == \"${WORKSPACE_PREFIX}/notes.txt\" and .replacements == 1"
 
-# 11) Workspace list files
+# 12) Workspace list files
 run_json_test \
   "Workspace list files" \
   "/v1/tools/list_files" \
   "{\"path\":\"${WORKSPACE_PREFIX}\",\"recursive\":true,\"max_entries\":20}" \
   ".path == \"${WORKSPACE_PREFIX}\" and (.entries | type == \"array\") and ((.entries | map(.path) | index(\"${WORKSPACE_PREFIX}/notes.txt\")) != null)"
 
-# 12) Workspace exec command
+# 13) Workspace exec command
 run_json_test \
   "Workspace exec command" \
   "/v1/tools/exec_command" \
   "{\"command\":\"python3 -c \\\"print(437)\\\"\",\"cwd\":\"${WORKSPACE_PREFIX}\",\"timeout_seconds\":10}" \
   '.returncode == 0 and (.stdout | contains("437")) and .timed_out == false'
 
-# 13) Workspace invalid path
+# 14) Workspace invalid path
 run_json_test \
   "Workspace invalid path" \
   "/v1/tools/read_file" \
   '{"path":"../../etc/passwd"}' \
   '.error == "path escapes the workspace root"'
 
-# 14) Exec command blocked executable
+# 15) Exec command blocked executable
 run_json_test \
   "Exec command blocked executable" \
   "/v1/tools/exec_command" \
   '{"command":"ls","cwd":".","timeout_seconds":5}' \
   '(.error | contains("EXEC_COMMAND_ALLOWLIST"))'
 
-# 15) Exec command timeout
+# 16) Exec command timeout
 run_json_test \
   "Exec command timeout" \
   "/v1/tools/exec_command" \
   '{"command":"python3 -c \"import time; time.sleep(2)\"","cwd":".","timeout_seconds":1}' \
   '.timed_out == true and .timeout_seconds == 1'
 
-# 16) App scaffold package.json
+# 17) App scaffold package.json
 run_json_test \
   "App scaffold package.json" \
   "/v1/tools/write_file" \
   "{\"path\":\"${WORKSPACE_PREFIX}/package.json\",\"content\":\"{\\n  \\\"name\\\": \\\"test-app\\\",\\n  \\\"private\\\": true,\\n  \\\"version\\\": \\\"0.0.0\\\",\\n  \\\"type\\\": \\\"module\\\",\\n  \\\"scripts\\\": {\\n    \\\"build\\\": \\\"vite build\\\"\\n  },\\n  \\\"devDependencies\\\": {\\n    \\\"vite\\\": \\\"^7.1.7\\\"\\n  }\\n}\\n\",\"create_dirs\":true}" \
   ".path == \"${WORKSPACE_PREFIX}/package.json\" and .bytes_written > 0"
 
-# 17) App scaffold index.html
+# 18) App scaffold index.html
 run_json_test \
   "App scaffold index.html" \
   "/v1/tools/write_file" \
   "{\"path\":\"${WORKSPACE_PREFIX}/index.html\",\"content\":\"<!doctype html>\\n<html lang=\\\"en\\\">\\n  <head>\\n    <meta charset=\\\"UTF-8\\\" />\\n    <meta name=\\\"viewport\\\" content=\\\"width=device-width, initial-scale=1.0\\\" />\\n    <title>NUC Test App</title>\\n  </head>\\n  <body>\\n    <div id=\\\"app\\\"></div>\\n    <script type=\\\"module\\\" src=\\\"/src/main.js\\\"></script>\\n  </body>\\n</html>\\n\",\"create_dirs\":true}" \
   ".path == \"${WORKSPACE_PREFIX}/index.html\" and .bytes_written > 0"
 
-# 18) App scaffold entrypoint
+# 19) App scaffold entrypoint
 run_json_test \
   "App scaffold entrypoint" \
   "/v1/tools/write_file" \
   "{\"path\":\"${WORKSPACE_PREFIX}/src/main.js\",\"content\":\"document.querySelector(\\\"#app\\\").innerHTML = '<main><h1>NUC test app</h1><p>If you can read this, file tools and build tooling work.</p></main>';\\n\",\"create_dirs\":true}" \
   ".path == \"${WORKSPACE_PREFIX}/src/main.js\" and .bytes_written > 0"
 
-# 19) App install deps
+# 20) App install deps
 run_json_test \
   "App install deps" \
   "/v1/tools/exec_command" \
   "{\"command\":\"npm install\",\"cwd\":\"${WORKSPACE_PREFIX}\",\"timeout_seconds\":300}" \
   '.returncode == 0 and (.stdout | contains("vulnerabilities")) and .timed_out == false'
 
-# 20) App build
+# 21) App build
 run_json_test \
   "App build" \
   "/v1/tools/exec_command" \
   "{\"command\":\"npm run build\",\"cwd\":\"${WORKSPACE_PREFIX}\",\"timeout_seconds\":300}" \
   '.returncode == 0 and (.stdout | contains("vite build")) and (.stdout | contains("built in")) and .timed_out == false'
 
-# 21) App dist output
+# 22) App dist output
 run_json_test \
   "App dist output" \
   "/v1/tools/list_files" \

@@ -1,6 +1,7 @@
 import asyncio
 import heapq
 import json
+import logging
 import time
 
 import httpx
@@ -36,6 +37,11 @@ from tooling import TOOL_REGISTRY, build_all_tool_specs, execute_tool_call
 
 
 app = FastAPI()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+)
 
 
 @app.middleware("http")
@@ -187,12 +193,23 @@ async def chat(request: Request, req: dict):
 
     model = req.get("model", DEFAULT_MODEL)
     messages = normalize_openai_messages(req.get("messages", []))
-    execution_mode = normalize_execution_mode(req.get("tool_execution_mode", TOOL_EXECUTION_MODE))
-    tools = build_effective_tools(req.get("tools"), req.get("functions"), execution_mode)
+    raw_execution_mode = req.get("tool_execution_mode")
+    explicit_server_requested = str(raw_execution_mode or "").strip().lower() == "server"
+    execution_mode = normalize_execution_mode(raw_execution_mode if raw_execution_mode is not None else TOOL_EXECUTION_MODE)
+    tools = build_effective_tools(
+        req.get("tools"),
+        req.get("functions"),
+        execution_mode,
+        allow_auto_server_tools=explicit_server_requested,
+    )
     tool_choice = normalize_tool_choice(req.get("tool_choice", "auto"), tools)
     stream = bool(req.get("stream", False))
 
     start_time = time.time()
+
+    # Create session for trazabilidad
+    session = state.create_session(model)
+    request_id = session["request_id"]
 
     try:
         if tools:
@@ -203,13 +220,18 @@ async def chat(request: Request, req: dict):
                     tools=tools,
                     tool_choice=tool_choice,
                     execution_mode=execution_mode,
+                    request_id=request_id,
                 )
             except RuntimeError as exc:
                 state.METRICS["errors"] += 1
+                state.close_session(request_id, error=str(exc))
                 return JSONResponse(status_code=500, content={"error": str(exc)})
             except httpx.HTTPError as exc:
                 state.METRICS["errors"] += 1
+                state.close_session(request_id, error=f"ollama error: {exc}")
                 return JSONResponse(status_code=502, content={"error": f"ollama error: {exc}"})
+
+            state.close_session(request_id, final_result=final_message)
 
             if stream:
                 async def tool_stream_generator():
@@ -495,3 +517,12 @@ async def openapi_spec():
         },
         "paths": paths,
     }
+
+
+@app.get("/v1/sessions/{request_id}")
+async def get_session(request_id: str):
+    """Return the full session diagnostic record for a request_id."""
+    session = state.get_session(request_id)
+    if session is None:
+        return JSONResponse(status_code=404, content={"error": "session not found or expired"})
+    return JSONResponse(content=session)

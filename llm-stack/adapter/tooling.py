@@ -35,7 +35,21 @@ from config import (
     TOOL_OUTPUT_MAX_LEN,
     WORKSPACE_DIR,
 )
-from state import METRICS, bump_metric_dict, bump_tool_status_metric
+from state import (
+    BG_PROCESS_STORE,
+    EXEC_TOOLS,
+    FS_TOOLS,
+    METRICS,
+    append_tool_call,
+    bump_metric_dict,
+    bump_tool_status_metric,
+    get_bg_process,
+    list_bg_processes,
+    log_tool_call,
+    SESSION_STORE,
+    start_bg_process,
+    stop_bg_process,
+)
 
 try:
     from zoneinfo import ZoneInfo
@@ -456,6 +470,59 @@ async def run_browser_extract(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+async def run_browser_screenshot(args: Dict[str, Any]) -> Dict[str, Any]:
+    url = str(args.get("url", "")).strip()
+    if not url:
+        return {"error": "url is required"}
+    if not url.startswith(("http://", "https://")):
+        return {"error": "url must start with http:// or https://"}
+
+    timeout_seconds = max(5, min(int(args.get("timeout_seconds", HTTP_TIMEOUT)), 60))
+    viewport_width = max(320, min(int(args.get("viewport_width", 1280)), 3840))
+    viewport_height = max(240, min(int(args.get("viewport_height", 800)), 2160))
+    full_page = str(args.get("full_page", "false")).strip().lower() == "true"
+
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return {"error": "browser_screenshot requires playwright to be installed in the container"}
+
+    screenshot_bytes: Optional[bytes] = None
+    error_msg = ""
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
+            page = await browser.new_page(
+                viewport={"width": viewport_width, "height": viewport_height},
+            )
+            await page.goto(url, timeout=timeout_seconds * 1000, wait_until="networkidle")
+            screenshot_bytes = await page.screenshot(
+                full_page=full_page,
+                type="png",
+            )
+            await browser.close()
+    except Exception as exc:
+        error_msg = str(exc)
+
+    if screenshot_bytes is None:
+        return {"error": f"screenshot failed: {error_msg}"}
+
+    import base64
+    b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+    return {
+        "url": url,
+        "viewport": {"width": viewport_width, "height": viewport_height},
+        "full_page": full_page,
+        "format": "png",
+        "size_bytes": len(screenshot_bytes),
+        "base64": b64[:TOOL_OUTPUT_MAX_LEN],
+    }
+
+
 async def run_weather(args: Dict[str, Any]) -> Dict[str, Any]:
     location = str(args.get("location", "")).strip()
     if not location:
@@ -750,6 +817,11 @@ async def run_http_request(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def run_sqlite_query(args: Dict[str, Any]) -> Dict[str, Any]:
+    return run_sqlite_query_sync(args)
+
+
+def run_sqlite_query_sync(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Synchronous version of run_sqlite_query for testing."""
     db_path = str(args.get("db_path", AUTH_DB_PATH)).strip() or AUTH_DB_PATH
     query = str(args.get("query", "")).strip()
     if not query:
@@ -986,6 +1058,121 @@ async def run_mkdir(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# ---- Background process tools ----
+
+async def run_start_bg_process(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Start a long-running process in the background without waiting for completion."""
+    command = str(args.get("command", "")).strip()
+    if not command:
+        return {"error": "command is required"}
+
+    try:
+        parts = shlex.split(command)
+    except Exception as exc:
+        return {"error": f"invalid command: {exc}"}
+
+    if not parts:
+        return {"error": "command is empty"}
+
+    cwd = resolve_workspace_path(str(args.get("cwd", ".")).strip(), allow_missing=False)
+    if not cwd.is_dir():
+        return {"error": "cwd must point to a directory"}
+
+    executable = parts[0]
+    executable_name = Path(executable).name if "/" in executable else executable
+    if executable not in EXEC_COMMAND_ALLOWLIST and executable_name not in EXEC_COMMAND_ALLOWLIST:
+        return {
+            "error": "command is not in EXEC_COMMAND_ALLOWLIST",
+            "allowed_commands": sorted(EXEC_COMMAND_ALLOWLIST),
+        }
+
+    resolved_executable = shutil.which(executable)
+    if resolved_executable is None:
+        local_candidate = resolve_workspace_path(str((cwd / executable).relative_to(WORKSPACE_ROOT)), allow_missing=False)
+        if not local_candidate.is_file():
+            return {"error": f"executable '{executable}' is not installed in the adapter runtime"}
+        resolved_executable = str(local_candidate)
+
+    parts[0] = resolved_executable
+
+    env = os.environ.copy()
+    extra_env = args.get("env", {})
+    if extra_env:
+        if not isinstance(extra_env, dict):
+            return {"error": "env must be an object"}
+        for key, value in extra_env.items():
+            env[str(key)] = str(value)
+
+    result = start_bg_process(parts, str(cwd), env)
+    if "error" in result:
+        return result
+    return {
+        "process_id": result["process_id"],
+        "pid": result["pid"],
+        "command": parts,
+        "cwd": workspace_relpath(cwd),
+    }
+
+
+async def run_bg_process_status(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Get status and output of a background process by process_id."""
+    process_id = str(args.get("process_id", "")).strip()
+    if not process_id:
+        return {"error": "process_id is required"}
+
+    proc_info = get_bg_process(process_id)
+    if proc_info is None:
+        return {"error": "process not found"}
+
+    return {
+        "process_id": proc_info["process_id"],
+        "pid": proc_info.get("pid"),
+        "command": proc_info.get("command"),
+        "cwd": proc_info.get("cwd"),
+        "running": proc_info.get("running"),
+        "returncode": proc_info.get("returncode"),
+        "stdout": proc_info.get("stdout", ""),
+        "stderr": proc_info.get("stderr", ""),
+        "started_at": proc_info.get("started_at"),
+        "finished_at": proc_info.get("finished_at"),
+    }
+
+
+async def run_list_bg_processes(args: Dict[str, Any]) -> Dict[str, Any]:
+    """List all background processes."""
+    processes = list_bg_processes()
+    return {
+        "processes": [
+            {
+                "process_id": p["process_id"],
+                "pid": p.get("pid"),
+                "command": p.get("command"),
+                "running": p.get("running"),
+                "returncode": p.get("returncode"),
+                "started_at": p.get("started_at"),
+            }
+            for p in processes
+        ],
+        "count": len(processes),
+    }
+
+
+async def run_stop_bg_process(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Stop a running background process."""
+    process_id = str(args.get("process_id", "")).strip()
+    if not process_id:
+        return {"error": "process_id is required"}
+
+    result = stop_bg_process(process_id)
+    if "error" in result:
+        return result
+    return {
+        "process_id": process_id,
+        "stopped": True,
+        "returncode": result.get("returncode"),
+    }
+
+
 async def run_exec_command(args: Dict[str, Any]) -> Dict[str, Any]:
     command = str(args.get("command", "")).strip()
     if not command:
@@ -1162,6 +1349,13 @@ async def run_calendar_events(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def run_python(args: Dict[str, Any]) -> Dict[str, Any]:
+    return run_python_sync(args)
+
+
+# ---- Sync wrappers for unit testing (same logic as async versions) ----
+
+def run_python_sync(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Synchronous version of run_python for testing."""
     code = str(args.get("code", ""))
     if not code.strip():
         return {"error": "code is required"}
@@ -1181,6 +1375,38 @@ async def run_python(args: Dict[str, Any]) -> Dict[str, Any]:
         "stderr": result.stderr[:TOOL_OUTPUT_MAX_LEN],
         "returncode": result.returncode,
     }
+
+
+def run_sqlite_query_sync(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Synchronous version of run_sqlite_query for testing."""
+    db_path = str(args.get("db_path", AUTH_DB_PATH)).strip() or AUTH_DB_PATH
+    query = str(args.get("query", "")).strip()
+    if not query:
+        return {"error": "query is required"}
+
+    lowered = query.lower()
+    if ";" in query.strip().rstrip(";"):
+        return {"error": "multiple SQL statements are not allowed"}
+
+    readonly = str(args.get("readonly", "true")).strip().lower() != "false"
+    if readonly and not lowered.startswith(("select", "pragma", "with", "explain")):
+        return {"error": "readonly mode only allows select/pragma/with/explain queries"}
+
+    conn_local = sqlite3.connect(db_path)
+    conn_local.row_factory = sqlite3.Row
+    try:
+        cur = conn_local.execute(query)
+        rows = cur.fetchmany(SQLITE_QUERY_MAX_ROWS)
+        columns = [desc[0] for desc in (cur.description or [])]
+        return {
+            "db_path": db_path,
+            "readonly": readonly,
+            "columns": columns,
+            "rows": [dict(row) for row in rows],
+            "row_count": len(rows),
+        }
+    finally:
+        conn_local.close()
 
 
 async def run_save_file(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1267,6 +1493,22 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         },
         "handler": run_browser_extract,
     },
+    "browser_screenshot": {
+        "description": "Take a PNG screenshot of a web page using a headless Chromium browser via Playwright. Returns base64-encoded PNG image.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Absolute http or https URL to screenshot."},
+                "viewport_width": {"type": "integer", "description": "Browser viewport width in pixels. Default 1280."},
+                "viewport_height": {"type": "integer", "description": "Browser viewport height in pixels. Default 800."},
+                "full_page": {"type": "boolean", "description": "Capture full scrollable page instead of just the viewport. Default false."},
+                "timeout_seconds": {"type": "integer", "description": "Navigation timeout in seconds. Default 30."},
+            },
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+        "handler": run_browser_screenshot,
+    },
     "python": {
         "description": "Execute Python code locally and return stdout, stderr and return code. Use only for computation or text/data processing tasks.",
         "parameters": {
@@ -1278,7 +1520,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "handler": run_python,
     },
     "save_file": {
-        "description": "Save a UTF-8 text file to local disk. Use only when the user explicitly asks to create or save a file.",
+        "description": "INTERNAL: Save adapter state or metadata files to /data/files. NOT for project code. For writing project files, use write_file instead.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1515,6 +1757,53 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         },
         "handler": run_exec_command,
     },
+    "start_bg_process": {
+        "description": "Start a long-running process in the background without waiting for it to finish. Use bg_process_status to check output and bg_process_stop to terminate it.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Command line to execute."},
+                "cwd": {"type": "string", "description": "Relative working directory inside the workspace."},
+                "env": {"type": "object", "description": "Optional environment variable overrides."},
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+        "handler": run_start_bg_process,
+    },
+    "bg_process_status": {
+        "description": "Get the current status, output and return code of a background process.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "process_id": {"type": "string", "description": "The process ID returned by start_bg_process."},
+            },
+            "required": ["process_id"],
+            "additionalProperties": False,
+        },
+        "handler": run_bg_process_status,
+    },
+    "list_bg_processes": {
+        "description": "List all background processes started by this adapter session.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        "handler": run_list_bg_processes,
+    },
+    "stop_bg_process": {
+        "description": "Stop a running background process by its process_id.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "process_id": {"type": "string", "description": "The process ID returned by start_bg_process."},
+            },
+            "required": ["process_id"],
+            "additionalProperties": False,
+        },
+        "handler": run_stop_bg_process,
+    },
 }
 
 
@@ -1589,14 +1878,24 @@ def build_all_tool_specs() -> List[Dict[str, Any]]:
     return [build_tool_spec(name) for name in TOOL_REGISTRY.keys()]
 
 
-async def execute_tool_call(name: str, raw_args: Any) -> Dict[str, Any]:
+async def execute_tool_call(name: str, raw_args: Any, request_id: Optional[str] = None) -> Dict[str, Any]:
     METRICS["tool_requests_total"] += 1
+    if name in EXEC_TOOLS:
+        METRICS["tool_exec_calls"] += 1
+    elif name in FS_TOOLS:
+        METRICS["tool_fs_calls"] += 1
     start = datetime.now().timestamp()
+    args = None
+    result = None
 
     if name not in TOOL_REGISTRY:
         bump_metric_dict("tool_errors_total", name)
         bump_tool_status_metric(name, "not_found")
-        return {"error": f"tool '{name}' not found"}
+        error_result = {"error": f"tool '{name}' not found"}
+        log_tool_call(name, {}, error_result, 0, request_id)
+        if request_id and request_id in SESSION_STORE:
+            append_tool_call(request_id, name, {}, error_result, 0)
+        return error_result
 
     try:
         args = parse_json_object(raw_args)
@@ -1614,6 +1913,15 @@ async def execute_tool_call(name: str, raw_args: Any) -> Dict[str, Any]:
     except Exception as exc:
         bump_metric_dict("tool_errors_total", name)
         bump_tool_status_metric(name, "exception")
-        return {"error": str(exc)}
+        error_result = {"error": str(exc)}
+        log_tool_call(name, args or {}, error_result, 0, request_id)
+        if request_id and request_id in SESSION_STORE:
+            append_tool_call(request_id, name, args or {}, error_result, 0)
+        return error_result
     finally:
+        duration_ms = (datetime.now().timestamp() - start) * 1000
         METRICS["tool_latency"].append(datetime.now().timestamp() - start)
+        if result is not None:
+            log_tool_call(name, args or {}, result, duration_ms, request_id)
+            if request_id and request_id in SESSION_STORE:
+                append_tool_call(request_id, name, args or {}, result, duration_ms)
