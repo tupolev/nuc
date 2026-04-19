@@ -37,6 +37,9 @@ services:
     restart: unless-stopped
     volumes:
       - ./data:/data
+      - ./workspace:/workspace
+      - /home/tupolev/test-app:/workspace/test-app
+      - /home/tupolev/test-app-php:/workspace/test-app-php
     ports:
       - "4000:4000"
 

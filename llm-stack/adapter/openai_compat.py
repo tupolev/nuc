@@ -48,7 +48,7 @@ def convert_legacy_functions_to_tools(functions: Any) -> List[Dict[str, Any]]:
     return tools
 
 
-def normalize_openai_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+def normalize_local_openai_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     if not tools:
         return []
 
@@ -70,16 +70,52 @@ def normalize_openai_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[s
     return normalized
 
 
-def build_effective_tools(requested_tools: Any, legacy_functions: Any) -> List[Dict[str, Any]]:
+def normalize_passthrough_openai_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    if not tools:
+        return []
+
+    normalized = []
+    seen = set()
+
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+
+        fn = tool.get("function") or {}
+        name = fn.get("name")
+        if not isinstance(name, str) or not name or name in seen:
+            continue
+
+        normalized.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": str(fn.get("description", "") or ""),
+                    "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+                },
+            }
+        )
+        seen.add(name)
+
+    return normalized
+
+
+def build_effective_tools(requested_tools: Any, legacy_functions: Any, execution_mode: str) -> List[Dict[str, Any]]:
     candidate_tools = requested_tools or []
     if not candidate_tools and legacy_functions:
         candidate_tools = convert_legacy_functions_to_tools(legacy_functions)
 
-    normalized = normalize_openai_tools(candidate_tools)
+    if execution_mode == "client":
+        normalized = normalize_passthrough_openai_tools(candidate_tools)
+        if normalized:
+            return normalized
+
+    normalized = normalize_local_openai_tools(candidate_tools)
     if normalized:
         return normalized
 
-    if AUTO_ENABLE_LOCAL_TOOLS:
+    if execution_mode == "server" and AUTO_ENABLE_LOCAL_TOOLS:
         return build_all_tool_specs()
 
     return []
@@ -296,20 +332,38 @@ def extract_tool_calls_from_content(
         return []
 
     text = strip_wrapping_code_fence(content)
-    payload: Any = None
+    payloads: List[Any] = []
 
     try:
-        payload = json.loads(text)
+        payloads = [json.loads(text)]
     except Exception:
-        return []
+        decoder = json.JSONDecoder()
+        index = 0
+        text_len = len(text)
+
+        while index < text_len:
+            while index < text_len and text[index].isspace():
+                index += 1
+
+            if index >= text_len:
+                break
+
+            try:
+                payload, next_index = decoder.raw_decode(text, index)
+            except Exception:
+                return []
+
+            payloads.append(payload)
+            index = next_index
 
     candidate_items: List[Dict[str, Any]] = []
-    if isinstance(payload, dict) and isinstance(payload.get("tool_calls"), list):
-        candidate_items = [item for item in payload["tool_calls"] if isinstance(item, dict)]
-    elif isinstance(payload, dict):
-        candidate_items = [payload]
-    elif isinstance(payload, list):
-        candidate_items = [item for item in payload if isinstance(item, dict)]
+    for payload in payloads:
+        if isinstance(payload, dict) and isinstance(payload.get("tool_calls"), list):
+            candidate_items.extend(item for item in payload["tool_calls"] if isinstance(item, dict))
+        elif isinstance(payload, dict):
+            candidate_items.append(payload)
+        elif isinstance(payload, list):
+            candidate_items.extend(item for item in payload if isinstance(item, dict))
 
     results = []
     for item in candidate_items:
@@ -394,6 +448,88 @@ def make_stream_chunk(
     return "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
 
 
+def parse_tool_message_content(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if message.get("role") != "tool":
+        return None
+
+    content = message.get("content", "")
+    if not isinstance(content, str) or not content:
+        return None
+
+    try:
+        parsed = json.loads(content)
+    except Exception:
+        return None
+
+    if isinstance(parsed, dict):
+        return parsed
+    return None
+
+
+def get_latest_build_exec_result(history: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    for message in reversed(history):
+        if message.get("role") != "tool" or message.get("tool_name") != "exec_command":
+            continue
+
+        payload = parse_tool_message_content(message)
+        if not payload:
+            continue
+
+        command = payload.get("command")
+        command_text = " ".join(command) if isinstance(command, list) else str(command or "")
+        lowered = command_text.lower()
+        if "build" not in lowered:
+            continue
+
+        return {
+            "command": command_text,
+            "cwd": payload.get("cwd", "."),
+            "returncode": payload.get("returncode"),
+            "stdout": str(payload.get("stdout", "") or ""),
+            "stderr": str(payload.get("stderr", "") or ""),
+            "timed_out": bool(payload.get("timed_out", False)),
+        }
+
+    return None
+
+
+def reconcile_final_message_with_tool_results(
+    final_message: Dict[str, Any],
+    history: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    content = str(final_message.get("content", "") or "")
+    latest_build = get_latest_build_exec_result(history)
+    if not latest_build:
+        return final_message
+
+    lowered = content.lower()
+    build_succeeded = latest_build.get("returncode") == 0 and not latest_build.get("timed_out")
+    build_failed = latest_build.get("returncode") not in {None, 0} or latest_build.get("timed_out")
+
+    failure_markers = ("fail", "failed", "error", "did not pass", "unsuccessful")
+    success_markers = ("passed", "succeeded", "successful", "built", "build passed", "build succeeded")
+    says_failure = any(marker in lowered for marker in failure_markers)
+    says_success = any(marker in lowered for marker in success_markers)
+
+    if build_succeeded and says_failure:
+        note = (
+            f" Verified note: the latest build command `{latest_build['command']}` in "
+            f"`{latest_build['cwd']}` exited with code 0."
+        )
+        final_message["content"] = (content + note).strip()
+        return final_message
+
+    if build_failed and says_success:
+        note = (
+            f" Verified note: the latest build command `{latest_build['command']}` in "
+            f"`{latest_build['cwd']}` did not succeed."
+        )
+        final_message["content"] = (content + note).strip()
+        return final_message
+
+    return final_message
+
+
 async def run_chat_with_native_tools(
     model: str,
     messages: List[Dict[str, Any]],
@@ -460,6 +596,7 @@ async def run_chat_with_native_tools(
                     "role": "assistant",
                     "content": raw_message.get("content", "") or "",
                 }
+                final_message = reconcile_final_message_with_tool_results(final_message, history)
                 return final_message, history, iteration, "stop"
 
             openai_tool_calls = [make_openai_tool_call(tool_call) for tool_call in extracted_tool_calls]

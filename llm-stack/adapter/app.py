@@ -187,9 +187,9 @@ async def chat(request: Request, req: dict):
 
     model = req.get("model", DEFAULT_MODEL)
     messages = normalize_openai_messages(req.get("messages", []))
-    tools = build_effective_tools(req.get("tools"), req.get("functions"))
-    tool_choice = normalize_tool_choice(req.get("tool_choice", "auto"), tools)
     execution_mode = normalize_execution_mode(req.get("tool_execution_mode", TOOL_EXECUTION_MODE))
+    tools = build_effective_tools(req.get("tools"), req.get("functions"), execution_mode)
+    tool_choice = normalize_tool_choice(req.get("tool_choice", "auto"), tools)
     stream = bool(req.get("stream", False))
 
     start_time = time.time()
@@ -363,6 +363,21 @@ async def web_search(req: dict):
     return await execute_tool_call("web_search", req)
 
 
+@app.post("/v1/tools/browser_search")
+async def browser_search(req: dict):
+    return await execute_tool_call("browser_search", req)
+
+
+@app.post("/v1/tools/browser_open")
+async def browser_open(req: dict):
+    return await execute_tool_call("browser_open", req)
+
+
+@app.post("/v1/tools/browser_extract")
+async def browser_extract(req: dict):
+    return await execute_tool_call("browser_extract", req)
+
+
 @app.post("/v1/tools/python")
 async def python_tool(req: dict):
     return await execute_tool_call("python", req)
@@ -421,6 +436,36 @@ async def shell_safe_tool(req: dict):
 @app.post("/v1/tools/calendar_events")
 async def calendar_events_tool(req: dict):
     return await execute_tool_call("calendar_events", req)
+
+
+@app.post("/v1/tools/list_files")
+async def list_files_tool(req: dict):
+    return await execute_tool_call("list_files", req)
+
+
+@app.post("/v1/tools/read_file")
+async def read_file_tool(req: dict):
+    return await execute_tool_call("read_file", req)
+
+
+@app.post("/v1/tools/write_file")
+async def write_file_tool(req: dict):
+    return await execute_tool_call("write_file", req)
+
+
+@app.post("/v1/tools/patch_file")
+async def patch_file_tool(req: dict):
+    return await execute_tool_call("patch_file", req)
+
+
+@app.post("/v1/tools/mkdir")
+async def mkdir_tool(req: dict):
+    return await execute_tool_call("mkdir", req)
+
+
+@app.post("/v1/tools/exec_command")
+async def exec_command_tool(req: dict):
+    return await execute_tool_call("exec_command", req)
 
 
 @app.get("/v1/openapi.json")
