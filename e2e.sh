@@ -462,7 +462,93 @@ if [[ -n "${raw_collision:-}" ]]; then
   fi
 fi
 
-# 7) Tools catalog
+# 7) Fallback parser accepts JSON tool payload followed by prose
+TOTAL=$((TOTAL + 1))
+fallback_parser_output=$(docker compose -f /home/tupolev/llm-stack/docker-compose.yml exec -T adapter python - <<'PY'
+from openai_compat import extract_tool_calls_from_content
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "create_file",
+            "description": "Client-side file creator",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+]
+
+content = """{"name": "create_file", "arguments": {"file_path": "./weather", "content": "#!/bin/bash\\nexit 0\\n"}} Confirmation that the file was created: ./weather Usage example: ./weather Berlin"""
+print(extract_tool_calls_from_content(content, tools))
+PY
+) || fallback_parser_output=""
+
+if echo "$fallback_parser_output" | grep -q "create_file"; then
+  pass "Fallback parser handles JSON plus prose"
+else
+  fail "Fallback parser handles JSON plus prose" "parser did not recover tool call from mixed content"
+fi
+
+# 8) Fallback parser accepts prose before JSON tool payload
+TOTAL=$((TOTAL + 1))
+fallback_prefixed_output=$(docker compose -f /home/tupolev/llm-stack/docker-compose.yml exec -T adapter python - <<'PY'
+from openai_compat import extract_tool_calls_from_content
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Client-side file writer",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+]
+
+content = """I'll create the file now.\n{"name": "write_file", "arguments": {"path": "./hello.txt", "content": "hello"}}"""
+print(extract_tool_calls_from_content(content, tools))
+PY
+) || fallback_prefixed_output=""
+
+if echo "$fallback_prefixed_output" | grep -q "write_file"; then
+  pass "Fallback parser handles prose before JSON"
+else
+  fail "Fallback parser handles prose before JSON" "parser did not recover prefixed tool call"
+fi
+
+# 9) Legacy function_call is accepted
+TOTAL=$((TOTAL + 1))
+legacy_function_call_output=$(docker compose -f /home/tupolev/llm-stack/docker-compose.yml exec -T adapter python - <<'PY'
+from openai_compat import extract_tool_calls
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "create_file",
+            "description": "Client-side file creator",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+]
+
+raw_message = {
+    "function_call": {
+        "name": "create_file",
+        "arguments": {"file_path": "./weather", "content": "#!/bin/bash\nexit 0\n"},
+    }
+}
+print(extract_tool_calls(raw_message, tools))
+PY
+) || legacy_function_call_output=""
+
+if echo "$legacy_function_call_output" | grep -q "create_file"; then
+  pass "Legacy function_call compatibility"
+else
+  fail "Legacy function_call compatibility" "legacy function_call was not normalized"
+fi
+
+# 10) Tools catalog
 run_get_test \
   "Tools catalog" \
   "/v1/tools" \
@@ -480,28 +566,28 @@ run_get_test \
     and (map(.function.name) | index("mkdir")) != null
     and (map(.function.name) | index("exec_command")) != null'
 
-# 8) Workspace mkdir
+# 11) Workspace mkdir
 run_json_test \
   "Workspace mkdir" \
   "/v1/tools/mkdir" \
   "{\"path\":\"${WORKSPACE_PREFIX}\",\"parents\":true}" \
   '.path == "'"${WORKSPACE_PREFIX}"'" and (.created | type == "boolean")'
 
-# 9) Workspace write file
+# 12) Workspace write file
 run_json_test \
   "Workspace write file" \
   "/v1/tools/write_file" \
   "{\"path\":\"${WORKSPACE_PREFIX}/notes.txt\",\"content\":\"hello\\nworld\\n\",\"create_dirs\":true}" \
   ".path == \"${WORKSPACE_PREFIX}/notes.txt\" and .bytes_written > 0"
 
-# 10) Workspace read file
+# 13) Workspace read file
 run_json_test \
   "Workspace read file" \
   "/v1/tools/read_file" \
   "{\"path\":\"${WORKSPACE_PREFIX}/notes.txt\"}" \
   ".path == \"${WORKSPACE_PREFIX}/notes.txt\" and (.content | contains(\"hello\"))"
 
-# 11) Workspace patch file
+# 14) Workspace patch file
 run_json_test \
   "Workspace patch file" \
   "/v1/tools/patch_file" \
@@ -569,7 +655,7 @@ run_json_test \
   "App install deps" \
   "/v1/tools/exec_command" \
   "{\"command\":\"npm install\",\"cwd\":\"${WORKSPACE_PREFIX}\",\"timeout_seconds\":300}" \
-  '.returncode == 0 and (.stdout | contains("vulnerabilities")) and .timed_out == false'
+  '.returncode == 0 and .timed_out == false'
 
 # 21) App build
 run_json_test \

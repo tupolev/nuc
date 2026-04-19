@@ -125,8 +125,17 @@ The adapter is now biased toward client-side tool execution.
 - this is the correct behavior when the coding agent runs on the user's machine
 - local server tools are only auto-enabled when a request explicitly asks for `tool_execution_mode=server`
 - name collisions are handled safely in `client` mode: if the client exposes a tool called `write_file`, that call is returned to the client instead of being executed on the server
+- OpenAI-style compatibility is intentionally broad: the adapter accepts native `tool_calls`, legacy `function_call`, and fallback JSON tool payloads serialized into assistant text
+- fallback parsing tolerates common provider quirks such as prose before or after the JSON tool payload
+- the adapter also tells models not to invoke missing skills, slash commands, or plugin-style pseudo-tools; they must use only request-scoped tools
 
 This prevents the adapter from writing code files on the NUC when the real workspace lives on the client machine.
+
+Practical expectation for coding agents:
+
+- when the agent runs on the user's machine, file creation and editing must happen there
+- tools like `write_file`, `patch_file`, `exec_command`, `create_file`, or equivalent client-defined actions must come back to the client as tool calls
+- the NUC should only execute local tools when the caller explicitly opts into server-side execution
 
 ## Start the Stack
 
@@ -388,6 +397,7 @@ Current status:
 - embeddings
 - model listing
 - OpenAI-style tools
+- compatibility with `tool_calls` and legacy `function_call`
 - SSE streaming
 - `server` and `client` tool modes
 - JSON and Prometheus metrics
@@ -463,10 +473,10 @@ PHP-oriented command support is also available through `exec_command`, including
 - If a tool behaves incorrectly from a client, test the direct endpoint under `/v1/tools/...` first.
 - If an agent fails and you are not sure whether the problem is the client or the stack, run `e2e.sh`.
 - If a coding agent writes files on the server instead of the client, check that the request is using `client` mode and that server-side tools were not explicitly opted in.
+- If a provider emits JSON-like tool payloads inside normal assistant text, the adapter now tries to recover those calls, but native `tool_calls` are still the preferred path.
 
 ## Additional Documentation
 
-- Stack-level adapter notes: [`llm-stack/README.md`](/home/tupolev/llm-stack/README.md)
 - Agent implementation roadmap: [`llm-stack/AGENT_AUTONOMY_ROADMAP.md`](/home/tupolev/llm-stack/AGENT_AUTONOMY_ROADMAP.md)
 - Bootstrap recipes: [`llm-stack/BOOTSTRAP_RECIPES.md`](/home/tupolev/llm-stack/BOOTSTRAP_RECIPES.md)
 

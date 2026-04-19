@@ -152,6 +152,9 @@ def build_tool_system_message(tool_choice: Optional[Dict[str, Any]] = None) -> D
         "Only call a tool when it is necessary to answer accurately or perform the requested action. "
         "If you call a tool, produce valid tool calls with arguments matching the provided JSON schema. "
         "Never serialize tool calls as plain JSON text in message content. "
+        "Do not invoke skills, slash commands, plugins, MCP commands, or any external capability unless it was explicitly provided as a tool in this request. "
+        "Never emit lines like 'Skill \"...\"', '/command', or similar pseudo-tool syntax. "
+        "If you need to act, use only the provided function tools. "
         "Do not invent tool results. After tool results are provided, continue and produce the final answer.\n"
         "IMPORTANT — file operations: if the user asks you to create, modify, or save a file, "
         "you MUST call the write_file or patch_file tool to actually perform the operation. "
@@ -174,7 +177,7 @@ def normalize_openai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, 
 
     for message in messages:
         role = message.get("role")
-        if role not in {"system", "user", "assistant", "tool"}:
+        if role not in {"system", "user", "assistant", "tool", "function"}:
             continue
 
         content = message.get("content")
@@ -194,6 +197,8 @@ def normalize_openai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, 
 
         if role == "assistant" and message.get("tool_calls"):
             normalized_item["tool_calls"] = message["tool_calls"]
+        elif role == "assistant" and isinstance(message.get("function_call"), dict):
+            normalized_item["function_call"] = message["function_call"]
 
         if role == "tool":
             if message.get("name"):
@@ -202,6 +207,10 @@ def normalize_openai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, 
                 normalized_item["tool_name"] = message["tool_name"]
             if message.get("tool_call_id"):
                 normalized_item["tool_call_id"] = message["tool_call_id"]
+        elif role == "function":
+            normalized_item["role"] = "tool"
+            if message.get("name"):
+                normalized_item["tool_name"] = message["name"]
 
         normalized.append(normalized_item)
 
@@ -240,6 +249,15 @@ def to_ollama_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 )
             if native_tool_calls:
                 item["tool_calls"] = native_tool_calls
+        elif role == "assistant" and isinstance(message.get("function_call"), dict):
+            fn = message.get("function_call") or {}
+            args = fn.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    pass
+            item["tool_calls"] = [{"function": {"name": fn.get("name", ""), "arguments": args}}]
 
         if role == "tool":
             if message.get("tool_name"):
@@ -310,13 +328,28 @@ def coerce_fallback_tool_call(
     tool_choice: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     function_payload = item.get("function")
+    if not isinstance(function_payload, dict) and isinstance(item.get("function_call"), dict):
+        function_payload = item.get("function_call")
 
     if isinstance(function_payload, dict):
         name = choose_tool_name(function_payload.get("name"), available_tools, tool_choice)
-        arguments = function_payload.get("arguments", {})
+        arguments = (
+            function_payload.get("arguments")
+            if "arguments" in function_payload
+            else function_payload.get("input", {})
+        )
     else:
-        name = choose_tool_name(item.get("name"), available_tools, tool_choice)
-        arguments = item.get("arguments", {})
+        requested_name = item.get("name")
+        if requested_name is None:
+            requested_name = item.get("tool_name")
+        if requested_name is None:
+            requested_name = item.get("tool")
+        name = choose_tool_name(requested_name, available_tools, tool_choice)
+        arguments = item.get("arguments")
+        if arguments is None:
+            arguments = item.get("input")
+        if arguments is None:
+            arguments = item.get("params", {})
 
     if not name:
         return None
@@ -328,6 +361,25 @@ def coerce_fallback_tool_call(
             "arguments": arguments,
         },
     }
+
+
+def iter_json_candidates(text: str) -> List[Any]:
+    decoder = json.JSONDecoder()
+    payloads: List[Any] = []
+    starts = []
+
+    for index, char in enumerate(text):
+        if char in "[{":
+            starts.append(index)
+
+    for start in starts:
+        try:
+            payload, _ = decoder.raw_decode(text, start)
+        except Exception:
+            continue
+        payloads.append(payload)
+
+    return payloads
 
 
 def extract_tool_calls_from_content(
@@ -344,24 +396,9 @@ def extract_tool_calls_from_content(
     try:
         payloads = [json.loads(text)]
     except Exception:
-        decoder = json.JSONDecoder()
-        index = 0
-        text_len = len(text)
-
-        while index < text_len:
-            while index < text_len and text[index].isspace():
-                index += 1
-
-            if index >= text_len:
-                break
-
-            try:
-                payload, next_index = decoder.raw_decode(text, index)
-            except Exception:
-                return []
-
-            payloads.append(payload)
-            index = next_index
+        payloads = iter_json_candidates(text)
+        if not payloads:
+            return []
 
     candidate_items: List[Dict[str, Any]] = []
     for payload in payloads:
@@ -389,6 +426,11 @@ def extract_tool_calls(
     raw_tool_calls = raw_message.get("tool_calls") or []
     if isinstance(raw_tool_calls, list) and raw_tool_calls:
         return [item for item in raw_tool_calls if isinstance(item, dict)]
+
+    raw_function_call = raw_message.get("function_call")
+    if isinstance(raw_function_call, dict):
+        normalized = coerce_fallback_tool_call({"function_call": raw_function_call}, available_tools, tool_choice)
+        return [normalized] if normalized else []
 
     content = raw_message.get("content", "") or ""
     return extract_tool_calls_from_content(str(content), available_tools, tool_choice)
