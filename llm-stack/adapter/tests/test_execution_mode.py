@@ -28,10 +28,15 @@ class TestNormalizeExecutionMode:
         assert normalize_execution_mode("Client") == "client"
         assert normalize_execution_mode("SeRvEr") == "server"
 
-    def test_invalid_returns_server_default(self):
-        assert normalize_execution_mode("invalid") == "server"
-        assert normalize_execution_mode("") == "server"
-        assert normalize_execution_mode(None) == "server"
+    def test_invalid_returns_configured_safe_default(self):
+        assert normalize_execution_mode("invalid") == TOOL_EXECUTION_MODE
+        assert normalize_execution_mode("") == TOOL_EXECUTION_MODE
+        assert normalize_execution_mode(None) == TOOL_EXECUTION_MODE
+
+    def test_common_aliases_are_supported(self):
+        assert normalize_execution_mode("local") == "client"
+        assert normalize_execution_mode("host") == "client"
+        assert normalize_execution_mode("remote") == "server"
 
     def test_default_from_config(self):
         """When called with None, uses TOOL_EXECUTION_MODE from config."""
@@ -73,22 +78,23 @@ class TestBuildEffectiveToolsClientMode:
         assert len(result) >= 1
         assert any(t["function"]["name"] == "my_custom_tool" for t in result)
 
-    def test_client_mode_rejects_local_collisions(self):
-        """Client mode filters out tools whose names collide with local TOOL_REGISTRY."""
+    def test_client_mode_keeps_local_name_collisions_for_passthrough(self):
+        """Client mode keeps colliding names so the client can execute its own tools."""
         client_tools = [
             {"type": "function", "function": {"name": "list_files", "description": "Local collision", "parameters": {}}},
             {"type": "function", "function": {"name": "my_custom_tool", "description": "Custom tool", "parameters": {}}},
         ]
         result = build_effective_tools(client_tools, None, "client")
         names = {t["function"]["name"] for t in result}
-        assert "list_files" not in names
+        assert "list_files" in names
         assert "my_custom_tool" in names
 
-    def test_client_mode_unknown_local_falls_back_to_local(self):
-        """Client mode falls back to local tools if no passthrough tools provided."""
+    def test_client_mode_preserves_local_named_tool_as_passthrough(self):
+        """Client mode preserves a local-looking tool name for client-side execution."""
         local_tools = [{"type": "function", "function": {"name": "read_file", "description": "", "parameters": {}}}]
         result = build_effective_tools(local_tools, None, "client")
-        assert len(result) >= 1
+        assert len(result) == 1
+        assert result[0]["function"]["name"] == "read_file"
 
     def test_client_mode_empty_no_auto_enable(self):
         """Client mode with no tools and no auto-enable returns empty."""

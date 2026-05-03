@@ -37,6 +37,7 @@ from tooling import TOOL_REGISTRY, build_all_tool_specs, execute_tool_call
 
 
 app = FastAPI()
+logger = logging.getLogger(__name__)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -196,11 +197,31 @@ async def chat(request: Request, req: dict):
     raw_execution_mode = req.get("tool_execution_mode")
     explicit_server_requested = str(raw_execution_mode or "").strip().lower() == "server"
     execution_mode = normalize_execution_mode(raw_execution_mode if raw_execution_mode is not None else TOOL_EXECUTION_MODE)
+    requested_tools = req.get("tools") or []
+    requested_tool_names = []
+    if isinstance(requested_tools, list):
+        for tool in requested_tools:
+            if not isinstance(tool, dict):
+                continue
+            fn = tool.get("function") or {}
+            name = fn.get("name")
+            if isinstance(name, str) and name:
+                requested_tool_names.append(name)
     tools = build_effective_tools(
-        req.get("tools"),
+        requested_tools,
         req.get("functions"),
         execution_mode,
         allow_auto_server_tools=explicit_server_requested,
+    )
+    effective_tool_names = [tool.get("function", {}).get("name") for tool in tools if isinstance(tool, dict)]
+    logger.info(
+        "chat_request mode_raw=%s mode_effective=%s requested_tools=%s effective_tools=%s tool_choice=%s stream=%s",
+        raw_execution_mode,
+        execution_mode,
+        requested_tool_names,
+        effective_tool_names,
+        req.get("tool_choice", "auto"),
+        bool(req.get("stream", False)),
     )
     tool_choice = normalize_tool_choice(req.get("tool_choice", "auto"), tools)
     stream = bool(req.get("stream", False))

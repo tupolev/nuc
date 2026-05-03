@@ -33,6 +33,8 @@ The adapter is modularized for maintainability:
 - [`tooling.py`](/home/tupolev/llm-stack/adapter/tooling.py): tools and tool registry
 - [`openai_compat.py`](/home/tupolev/llm-stack/adapter/openai_compat.py): OpenAI/Ollama compatibility and tool calling
 
+Agent-facing skills live under [`llm-stack/skills/`](/home/tupolev/llm-stack/skills). These are not Python handlers inside the adapter. They are instruction files intended for coding agents so the agent can follow local conventions when deciding how to use tools. The current example is [`skills/Bash/SKILL.md`](/home/tupolev/llm-stack/skills/Bash/SKILL.md), which tells the agent to use OpenCode's built-in `bash`, `write`, and `edit` tools instead of inventing a fake "Bash" skill or emitting JSON-like tool calls in plain text.
+
 ## Architecture
 
 ```text
@@ -136,6 +138,42 @@ Practical expectation for coding agents:
 - when the agent runs on the user's machine, file creation and editing must happen there
 - tools like `write_file`, `patch_file`, `exec_command`, `create_file`, or equivalent client-defined actions must come back to the client as tool calls
 - the NUC should only execute local tools when the caller explicitly opts into server-side execution
+
+About `/workspace`:
+
+- `/workspace` is the adapter's server-side sandbox for local tools, tests, and end-to-end fixtures
+- it is still useful for `tool_execution_mode=server` and for validating the adapter itself
+- it is not the desired destination for generated project code when OpenCode or another agent is running on the client machine with its own file tools
+
+## Agent Skills
+
+The [`skills/`](/home/tupolev/llm-stack/skills) directory contains skills for the agent, not runtime plugins for the adapter.
+
+- each skill is defined by a `SKILL.md` file with short operational instructions for the agent
+- these files are meant to steer agent behavior in client environments such as OpenCode
+- they are useful when a model tends to invent pseudo-skills, pseudo-tools, or JSON blobs instead of using the real tools exposed by the client
+- the current [`Bash` skill](/home/tupolev/llm-stack/skills/Bash/SKILL.md) exists to reinforce a simple rule: use the built-in `bash`, `write`, and `edit` tools directly
+
+Practical expectation:
+
+- add a skill when the agent needs durable guidance for a recurring workflow
+- keep skills small, explicit, and tool-oriented
+- do not treat `skills/` as code executed by the adapter; they are instructions consumed by the agent layer
+
+## OpenCode Client Config
+
+A recommended OpenCode client config is available at [`client/opencode/config/opencode.jsonc`](/home/tupolev/llm-stack/client/opencode/config/opencode.jsonc).
+
+This config is intentionally biased toward direct coding tools:
+
+- allows `bash`, `read`, `edit`, `write`, `glob`, and `grep`
+- denies `todowrite`, `todoread`, `task`, and `skill`
+
+Why this matters:
+
+- some local models will otherwise burn turns on planning or pseudo-skill flows instead of creating or editing the requested file
+- for short coding tasks, denying those meta-tools improves the chance that the model goes straight to `write`/`edit`/`bash`
+- if you need a richer planning workflow later, you can relax those denies for stronger models or longer tasks
 
 ## Start the Stack
 
@@ -290,6 +328,25 @@ curl http://localhost:4000/v1/models \
   -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
+Current configured/tested model names in this stack:
+
+Tool-capable models for agentic clients such as OpenCode:
+
+- `qwen2.5-coder:14b`
+- `qwen2.5-coder:7b`
+- `qwen3-coder`
+- `llama3-groq-tool-use:8b`
+- `llama3.1:8b`
+
+Chat-only model in the current Ollama setup:
+
+- `deepseek-coder-v2:16b`
+
+Notes:
+
+- `deepseek-coder-v2:16b` answers normal `/api/chat` requests, but Ollama rejects tool-enabled `/api/chat` requests for this model with `400 Bad Request` and `does not support tools`
+- for OpenCode or any other client that must use `bash`, `read`, `write`, `edit`, or similar request-scoped tools, prefer one of the tool-capable models above
+
 Simple chat:
 
 ```bash
@@ -297,7 +354,7 @@ curl http://localhost:4000/v1/chat/completions \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen2.5-coder:7b",
+    "model": "qwen2.5-coder:14b",
     "messages": [
       {"role":"user","content":"Hello"}
     ]
@@ -330,7 +387,7 @@ curl -N http://localhost:4000/v1/chat/completions \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen2.5-coder:7b",
+    "model": "llama3.1:8b",
     "stream": true,
     "messages": [
       {"role":"user","content":"Describe this server in one sentence."}
@@ -474,11 +531,6 @@ PHP-oriented command support is also available through `exec_command`, including
 - If an agent fails and you are not sure whether the problem is the client or the stack, run `e2e.sh`.
 - If a coding agent writes files on the server instead of the client, check that the request is using `client` mode and that server-side tools were not explicitly opted in.
 - If a provider emits JSON-like tool payloads inside normal assistant text, the adapter now tries to recover those calls, but native `tool_calls` are still the preferred path.
-
-## Additional Documentation
-
-- Agent implementation roadmap: [`llm-stack/AGENT_AUTONOMY_ROADMAP.md`](/home/tupolev/llm-stack/AGENT_AUTONOMY_ROADMAP.md)
-- Bootstrap recipes: [`llm-stack/BOOTSTRAP_RECIPES.md`](/home/tupolev/llm-stack/BOOTSTRAP_RECIPES.md)
 
 ## Uninstall
 

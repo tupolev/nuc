@@ -1,0 +1,46 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "bash": "allow",
+    "edit": "allow",
+    "read": "allow",
+    "write": "allow",
+    "glob": "allow",
+    "grep": "allow",
+
+    "todowrite": "deny",
+    "todoread": "deny",
+    "task": "deny",
+    "skill": "deny"
+  },
+  "disabled_providers": [],
+  "provider": {
+    "nuc": {
+      "name": "NUC",
+      "npm": "@ai-sdk/openai-compatible",
+      "models": {
+        "qwen2.5-coder:14b": {
+          "name": "qwen2.5-coder:14b"
+        },
+        "qwen2.5-coder:7b": {
+          "name": "qwen2.5-coder:7b"
+        },
+        "qwen3-coder": {
+          "name": "qwen3-coder"
+        },
+        "llama3-groq-tool-use:8b": {
+          "name": "llama3-groq-tool-use:8b"
+        },
+        "llama3.1:8b": {
+          "name": "llama3.1:8b"
+        },
+        "deepseek-coder-v2:16b": {
+          "name": "deepseek-coder-v2:16b"
+        }
+      },
+      "options": {
+        "baseURL": "https://nuc.fritz.box/v1"
+      }
+    }
+  }
+}

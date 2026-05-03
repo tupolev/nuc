@@ -1,11 +1,18 @@
 import json
+import logging
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from config import AUTO_ENABLE_LOCAL_TOOLS, OLLAMA_URL, TOOL_EXECUTION_MODE, TOOL_MAX_ITERATIONS
+from config import (
+    AUTO_ENABLE_LOCAL_TOOLS,
+    OLLAMA_CHAT_TIMEOUT_SECONDS,
+    OLLAMA_URL,
+    TOOL_EXECUTION_MODE,
+    TOOL_MAX_ITERATIONS,
+)
 from state import METRICS, bump_metric_dict, bump_tool_status_metric
 from tooling import (
     TOOL_REGISTRY,
@@ -15,11 +22,24 @@ from tooling import (
     safe_json_dumps,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def normalize_execution_mode(raw_mode: Any) -> str:
-    mode = str(raw_mode or TOOL_EXECUTION_MODE).strip().lower()
+    configured_mode = str(TOOL_EXECUTION_MODE or "client").strip().lower()
+    if configured_mode not in {"server", "client"}:
+        configured_mode = "client"
+
+    mode = str(raw_mode or configured_mode).strip().lower()
+    aliases = {
+        "local": "client",
+        "host": "client",
+        "remote": "server",
+    }
+    mode = aliases.get(mode, mode)
+
     if mode not in {"server", "client"}:
-        return "server"
+        return configured_mode
     return mode
 
 
@@ -308,9 +328,33 @@ def choose_tool_name(
     tool_choice: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     available_names = [tool["function"]["name"] for tool in available_tools]
+    lowercase_names = {name.lower(): name for name in available_names}
 
     if isinstance(requested_name, str) and requested_name in available_names:
         return requested_name
+    if isinstance(requested_name, str):
+        lowered = requested_name.strip().lower()
+        if lowered in lowercase_names:
+            return lowercase_names[lowered]
+
+        aliases = {
+            "create_file": ["write", "edit"],
+            "write_file": ["write", "edit"],
+            "save_file": ["write", "edit"],
+            "edit_file": ["edit", "write"],
+            "todofile": ["todowrite"],
+            "todo_file": ["todowrite"],
+            "todo-write": ["todowrite"],
+            "todo_write": ["todowrite"],
+            "run_bash": ["bash"],
+            "shell": ["bash"],
+            "read_file": ["read"],
+            "search": ["grep"],
+            "fetch_url": ["webfetch"],
+        }
+        for candidate in aliases.get(lowered, []):
+            if candidate in available_names:
+                return candidate
 
     forced_name = (tool_choice or {}).get("forced_name")
     if forced_name in available_names:
@@ -320,6 +364,113 @@ def choose_tool_name(
         return available_names[0]
 
     return None
+
+
+def normalize_tool_arguments(name: str, arguments: Any) -> Any:
+    if not isinstance(arguments, dict):
+        return arguments
+
+    normalized = dict(arguments)
+
+    def normalize_todo_item(item: Any) -> Any:
+        if not isinstance(item, dict):
+            return item
+
+        todo = dict(item)
+        if "content" not in todo:
+            for key in ("text", "title", "name", "task"):
+                value = todo.get(key)
+                if isinstance(value, str) and value.strip():
+                    todo["content"] = value
+                    break
+
+        if "status" not in todo or not isinstance(todo.get("status"), str) or not todo.get("status", "").strip():
+            todo["status"] = "pending"
+
+        if "priority" not in todo or not isinstance(todo.get("priority"), str) or not todo.get("priority", "").strip():
+            todo["priority"] = "medium"
+
+        return todo
+
+    # Be tolerant with models that use generic file-tool argument names.
+    if name in {"edit", "write"}:
+        if "filePath" not in normalized:
+            if "file_path" in normalized:
+                normalized["filePath"] = normalized["file_path"]
+            elif "path" in normalized:
+                normalized["filePath"] = normalized["path"]
+        if "file_path" not in normalized and "filePath" in normalized:
+            normalized["file_path"] = normalized["filePath"]
+        if "file_path" not in normalized and "path" in normalized:
+            normalized["file_path"] = normalized["path"]
+        if "content" not in normalized and "text" in normalized:
+            normalized["content"] = normalized["text"]
+    elif name == "read":
+        if "filePath" not in normalized:
+            if "file_path" in normalized:
+                normalized["filePath"] = normalized["file_path"]
+            elif "path" in normalized:
+                normalized["filePath"] = normalized["path"]
+        if "file_path" not in normalized and "filePath" in normalized:
+            normalized["file_path"] = normalized["filePath"]
+        if "file_path" not in normalized and "path" in normalized:
+            normalized["file_path"] = normalized["path"]
+    elif name == "grep":
+        if "pattern" not in normalized and "query" in normalized:
+            normalized["pattern"] = normalized["query"]
+    elif name == "bash":
+        if "command" not in normalized and "cmd" in normalized:
+            normalized["command"] = normalized["cmd"]
+    elif name == "todowrite":
+        if "todos" not in normalized:
+            for key in ("items", "entries", "tasks"):
+                if isinstance(normalized.get(key), list):
+                    normalized["todos"] = normalized[key]
+                    break
+
+        if "todos" not in normalized:
+            single_item = None
+            for key in ("todo", "task", "item"):
+                if isinstance(normalized.get(key), dict):
+                    single_item = dict(normalized[key])
+                    break
+
+            if single_item is None:
+                content_value = normalized.get("content") or normalized.get("text")
+                if isinstance(content_value, str) and content_value.strip():
+                    single_item = {"content": content_value}
+                    if "status" in normalized:
+                        single_item["status"] = normalized["status"]
+                    if "priority" in normalized:
+                        single_item["priority"] = normalized["priority"]
+                    if "id" in normalized:
+                        single_item["id"] = normalized["id"]
+
+            if isinstance(single_item, dict):
+                normalized["todos"] = [single_item]
+
+        if isinstance(normalized.get("todos"), list):
+            normalized["todos"] = [normalize_todo_item(item) for item in normalized["todos"]]
+
+    return normalized
+
+
+def choose_best_client_tool_name(
+    name: str,
+    arguments: Any,
+    available_tools: List[Dict[str, Any]],
+) -> str:
+    available_names = [tool["function"]["name"] for tool in available_tools]
+
+    if name == "edit" and isinstance(arguments, dict):
+        has_replace_payload = "content" in arguments and any(
+            key in arguments for key in ("filePath", "file_path", "path")
+        )
+        has_diff_payload = "oldString" in arguments or "newString" in arguments
+        if has_replace_payload and not has_diff_payload and "write" in available_names:
+            return "write"
+
+    return name
 
 
 def coerce_fallback_tool_call(
@@ -354,11 +505,14 @@ def coerce_fallback_tool_call(
     if not name:
         return None
 
+    normalized_arguments = normalize_tool_arguments(name, arguments)
+    name = choose_best_client_tool_name(name, normalized_arguments, available_tools)
+
     return {
         "id": item.get("id") or f"call_{uuid.uuid4().hex}",
         "function": {
             "name": name,
-            "arguments": arguments,
+            "arguments": normalized_arguments,
         },
     }
 
@@ -425,7 +579,14 @@ def extract_tool_calls(
 ) -> List[Dict[str, Any]]:
     raw_tool_calls = raw_message.get("tool_calls") or []
     if isinstance(raw_tool_calls, list) and raw_tool_calls:
-        return [item for item in raw_tool_calls if isinstance(item, dict)]
+        results = []
+        for item in raw_tool_calls:
+            if not isinstance(item, dict):
+                continue
+            normalized = coerce_fallback_tool_call(item, available_tools, tool_choice)
+            if normalized:
+                results.append(normalized)
+        return results
 
     raw_function_call = raw_message.get("function_call")
     if isinstance(raw_function_call, dict):
@@ -588,7 +749,7 @@ async def run_chat_with_native_tools(
     max_iterations: int = TOOL_MAX_ITERATIONS,
     request_id: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], int, str]:
-    async with httpx.AsyncClient(timeout=180.0) as client:
+    async with httpx.AsyncClient(timeout=float(OLLAMA_CHAT_TIMEOUT_SECONDS)) as client:
         history = list(messages)
         parsed_choice = tool_choice or {"mode": "auto", "forced_name": None}
 
@@ -627,7 +788,24 @@ async def run_chat_with_native_tools(
             data = response.json()
 
             raw_message = data.get("message", {}) or {}
+            logger.info(
+                "ollama_response execution_mode=%s native_tool_calls=%s has_function_call=%s content_preview=%r",
+                execution_mode,
+                bool(raw_message.get("tool_calls")),
+                isinstance(raw_message.get("function_call"), dict),
+                (raw_message.get("content", "") or "")[:300],
+            )
             extracted_tool_calls = extract_tool_calls(raw_message, tools, parsed_choice)
+            logger.info(
+                "tool_extraction execution_mode=%s extracted_tool_calls=%s extracted_names=%s",
+                execution_mode,
+                bool(extracted_tool_calls),
+                [
+                    ((tool_call.get("function") or {}).get("name"))
+                    for tool_call in extracted_tool_calls
+                    if isinstance(tool_call, dict)
+                ],
+            )
 
             if not extracted_tool_calls:
                 must_call = parsed_choice.get("mode") in {"required", "forced"}
