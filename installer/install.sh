@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 
-set -e
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "🚀 Installing Local LLM Stack..."
 
 REPO_URL="https://github.com/tupolev/nuc.git"
 INSTALL_DIR="/opt/llm-stack"
-SERVICE_NAME="llm-stack"
+STACK_DIR="${INSTALL_DIR}/llm-stack"
 
 # =========================
 # 1. System update
@@ -24,10 +26,25 @@ apt install -y \
     ca-certificates \
     gnupg \
     lsb-release \
-    sqlite3
+    sqlite3 \
+    sudo
 
 # =========================
-# 3. Install Docker
+# 3. Verify Ollama
+# =========================
+echo "🦙 Verifying Ollama..."
+if ! command -v systemctl &> /dev/null; then
+    echo "❌ systemctl is required, but was not found." >&2
+    exit 1
+fi
+
+if ! systemctl cat ollama.service >/dev/null 2>&1; then
+    echo "❌ Ollama is not installed or ollama.service is unavailable. Install Ollama before running this installer." >&2
+    exit 1
+fi
+
+# =========================
+# 4. Install Docker
 # =========================
 if ! command -v docker &> /dev/null; then
     echo "🐳 Installing Docker..."
@@ -52,39 +69,47 @@ systemctl enable docker
 systemctl start docker
 
 # =========================
-# 4. Clone repo
+# 5. Clone repo
 # =========================
 echo "📂 Cloning repository..."
-rm -rf $INSTALL_DIR
-git clone $REPO_URL $INSTALL_DIR
+rm -rf "$INSTALL_DIR"
+git clone "$REPO_URL" "$INSTALL_DIR"
 
-cd $INSTALL_DIR/llm-stack
+cd "$STACK_DIR"
 
 # =========================
-# 5. Create data + DB
+# 6. Create data + DB
 # =========================
 echo "🗄️ Setting up database..."
 mkdir -p data
 
+if [ ! -f .env ]; then
+    echo "📝 Creating .env from .env.example..."
+    cp .env.example .env
+fi
+
 sqlite3 data/auth.db <<EOF
 CREATE TABLE IF NOT EXISTS api_keys (
-  key TEXT PRIMARY KEY,
-  priority TEXT
+  key_hash TEXT PRIMARY KEY,
+  priority TEXT NOT NULL DEFAULT 'medium'
 );
-
-INSERT OR IGNORE INTO api_keys VALUES ('admin123', 'high');
-INSERT OR IGNORE INTO api_keys VALUES ('test123', 'medium');
-INSERT OR IGNORE INTO api_keys VALUES ('batch123', 'low');
 EOF
 
 # =========================
-# 6. Build + start stack
+# 7. Install Ollama tuning
+# =========================
+echo "⚙️ Applying Ollama tuning..."
+chmod +x "${STACK_DIR}/ollama/install-ollama-tuning.sh"
+"${STACK_DIR}/ollama/install-ollama-tuning.sh"
+
+# =========================
+# 8. Build + start stack
 # =========================
 echo "🐳 Starting Docker stack..."
 docker compose up -d --build
 
 # =========================
-# 7. Create systemd service (stack)
+# 9. Create systemd service (stack)
 # =========================
 echo "⚙️ Creating systemd service..."
 
@@ -95,7 +120,7 @@ After=docker.service
 Requires=docker.service
 
 [Service]
-WorkingDirectory=$INSTALL_DIR/llm-stack
+WorkingDirectory=$STACK_DIR
 ExecStart=/usr/bin/docker compose up -d
 ExecStop=/usr/bin/docker compose down
 Restart=always
@@ -106,12 +131,23 @@ WantedBy=multi-user.target
 EOF
 
 # =========================
-# 8. Warmup script wrapper
+# 10. Warmup script wrapper
 # =========================
 echo "🔥 Setting up Ollama warmup..."
 
 cat <<'EOF' > /usr/local/bin/warm-ollama-wrapper.sh
 #!/usr/bin/env bash
+
+set -euo pipefail
+
+MODELS=(
+  "qwen2.5-coder:14b"
+  "qwen2.5-coder:7b"
+  "llama3-groq-tool-use:8b"
+  "llama3.1:8b"
+  "qwen3-coder"
+  "deepseek-coder-v2:16b"
+)
 
 echo "Waiting for Ollama..."
 
@@ -121,13 +157,18 @@ done
 
 echo "Ollama ready. Warming up..."
 
-bash /opt/llm-stack/warm-ollama.sh
+for model in "${MODELS[@]}"; do
+  bash /opt/llm-stack/warm-ollama.sh "$model"
+done
+
+curl http://localhost:11434/api/embeddings \
+  -d '{"model":"all-minilm","prompt":"warmup"}'
 EOF
 
 chmod +x /usr/local/bin/warm-ollama-wrapper.sh
 
 # =========================
-# 9. Warmup systemd service
+# 11. Warmup systemd service
 # =========================
 cat <<EOF > /etc/systemd/system/ollama-warmup.service
 [Unit]
@@ -144,7 +185,7 @@ WantedBy=multi-user.target
 EOF
 
 # =========================
-# 10. Enable services
+# 12. Enable services
 # =========================
 echo "🔁 Enabling services..."
 

@@ -65,7 +65,7 @@ Grafana
 Install everything on a clean Ubuntu machine:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tupolev/nuc/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/tupolev/nuc/main/installer/install.sh | bash
 ```
 
 The installer is intended to:
@@ -73,12 +73,14 @@ The installer is intended to:
 1. update the system
 2. install dependencies such as `git`, `curl`, and `sqlite3`
 3. install Docker and Docker Compose
-4. clone the project into `/opt/llm-stack`
-5. create the auth database and API keys
-6. build and start the containers
-7. configure systemd services
-8. enable autostart
-9. warm up Ollama models
+4. verify that host Ollama is already installed as `ollama.service`
+5. clone the project into `/opt/llm-stack`
+6. create the auth database and local `.env`
+7. apply the versioned Ollama systemd tuning
+8. build and start the containers
+9. configure systemd services
+10. enable autostart
+11. warm up Ollama models
 
 ## Manual Requirements
 
@@ -253,6 +255,56 @@ View logs:
 journalctl -u llm-stack -f
 journalctl -u ollama-warmup -f
 ```
+
+## Ollama Tuning
+
+Ollama performance tuning is now versioned in the repository instead of being maintained only as a manual host edit.
+
+Versioned files:
+
+- [`llm-stack/ollama/systemd/override.conf`](/home/tupolev/llm-stack/ollama/systemd/override.conf)
+- [`llm-stack/ollama/install-ollama-tuning.sh`](/home/tupolev/llm-stack/ollama/install-ollama-tuning.sh)
+
+The installer applies this as a systemd drop-in at:
+
+```text
+/etc/systemd/system/ollama.service.d/override.conf
+```
+
+This step is run automatically by the main installer after Ollama has been verified.
+
+To apply it manually:
+
+```bash
+./llm-stack/ollama/install-ollama-tuning.sh
+```
+
+To verify the applied environment:
+
+```bash
+systemctl show ollama --property=Environment
+```
+
+To inspect Ollama logs:
+
+```bash
+journalctl -u ollama -b --no-pager
+```
+
+Current tuning:
+
+- `OLLAMA_KEEP_ALIVE=30m`
+  Keeps the model loaded for 30 minutes after the last request.
+- `OLLAMA_MAX_LOADED_MODELS=1`
+  Prevents several large models from being loaded at the same time.
+- `OLLAMA_NUM_PARALLEL=1`
+  Keeps Ollama internal parallelism conservative because the FastAPI adapter already handles scheduling.
+- `OLLAMA_MAX_QUEUE=20`
+  Limits Ollama's internal request queue.
+- `OLLAMA_FLASH_ATTENTION=1`
+  Enables Flash Attention to reduce memory usage for larger contexts.
+- `OLLAMA_KV_CACHE_TYPE=q8_0`
+  Uses 8-bit K/V cache to reduce memory usage with minimal expected quality impact.
 
 Warmup wrapper path:
 
