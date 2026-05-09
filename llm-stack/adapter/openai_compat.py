@@ -1,13 +1,16 @@
 import json
 import logging
+import re
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import httpx
 
 from config import (
     AUTO_ENABLE_LOCAL_TOOLS,
+    ENABLE_PSEUDO_TOOL_EXTRACTION,
+    FILTER_TOOLS_FOR_LOCAL_MODELS,
     OLLAMA_CHAT_TIMEOUT_SECONDS,
     OLLAMA_URL,
     TOOL_EXECUTION_MODE,
@@ -23,6 +26,51 @@ from tooling import (
 )
 
 logger = logging.getLogger(__name__)
+
+TOOL_USE_SYSTEM_PROMPT = """
+You are running inside an agentic coding environment.
+
+You MUST use the provided tools to inspect, create, edit, and verify files.
+
+When the user asks you to create, modify, implement, refactor, fix, compile, test, or inspect code, you MUST call the appropriate tool.
+
+Do NOT output source code, pseudo-code, Python snippets, shell snippets, or examples as plain text when a tool can perform the action.
+
+For file creation or modification:
+- Use the write or edit tool.
+- For shell commands, use the bash tool.
+- For reading files, use read, glob, or grep.
+
+If you need to create a file, call the write tool.
+If you need to modify a file, call the edit tool.
+If you need to verify something, call bash/read/glob/grep.
+
+Never answer with text like:
+write("file.txt", "content")
+or:
+Here is the code...
+
+Actually call the tool.
+""".strip()
+
+LOCAL_MODEL_ALLOWED_TOOLS = {
+    "bash",
+    "read",
+    "glob",
+    "grep",
+    "edit",
+    "write",
+}
+
+
+def is_behavior_enabled(
+    behavior_flags: Optional[Dict[str, Any]],
+    key: str,
+    default: bool = False,
+) -> bool:
+    if behavior_flags is None:
+        return default
+    return bool(behavior_flags.get(key, default))
 
 
 def normalize_execution_mode(raw_mode: Any) -> str:
@@ -166,26 +214,51 @@ def normalize_tool_choice(raw_tool_choice: Any, available_tools: List[Dict[str, 
     return {"mode": "auto", "forced_name": None}
 
 
-def build_tool_system_message(tool_choice: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    base_content = (
-        "You may use available tools when needed. "
-        "Only call a tool when it is necessary to answer accurately or perform the requested action. "
-        "If you call a tool, produce valid tool calls with arguments matching the provided JSON schema. "
-        "Never serialize tool calls as plain JSON text in message content. "
-        "Do not invoke skills, slash commands, plugins, MCP commands, or any external capability unless it was explicitly provided as a tool in this request. "
-        "Never emit lines like 'Skill \"...\"', '/command', or similar pseudo-tool syntax. "
-        "If you need to act, use only the provided function tools. "
-        "Do not invent tool results. After tool results are provided, continue and produce the final answer.\n"
-        "IMPORTANT — file operations: if the user asks you to create, modify, or save a file, "
-        "you MUST call the write_file or patch_file tool to actually perform the operation. "
-        "Describing a plan to write a file is NOT the same as writing it. "
-        "ALWAYS execute the tool call that performs the action the user requested."
+def inject_tool_use_system_prompt(
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]],
+    behavior_flags: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    if not tools or not is_behavior_enabled(behavior_flags, "enable_tool_prompt"):
+        return list(messages)
+
+    updated_messages = [dict(message) for message in messages]
+
+    if updated_messages and updated_messages[0].get("role") == "system":
+        original_content = str(updated_messages[0].get("content", "") or "")
+        if TOOL_USE_SYSTEM_PROMPT not in original_content:
+            updated_messages[0]["content"] = TOOL_USE_SYSTEM_PROMPT + "\n\n" + original_content
+    else:
+        updated_messages.insert(0, {"role": "system", "content": TOOL_USE_SYSTEM_PROMPT})
+
+    return updated_messages
+
+
+def filter_tools_for_local_models(
+    tools: Optional[List[Dict[str, Any]]],
+    behavior_flags: Optional[Dict[str, Any]] = None,
+) -> Optional[List[Dict[str, Any]]]:
+    if not tools:
+        return tools
+
+    if not FILTER_TOOLS_FOR_LOCAL_MODELS or not is_behavior_enabled(behavior_flags, "enable_tool_filtering"):
+        return tools
+
+    original_tool_names = [tool.get("function", {}).get("name") for tool in tools]
+    filtered = [
+        tool
+        for tool in tools
+        if tool.get("function", {}).get("name") in LOCAL_MODEL_ALLOWED_TOOLS
+    ]
+    filtered_tool_names = [tool.get("function", {}).get("name") for tool in filtered]
+
+    logger.info(
+        "filtered_tools_for_local_model original=%s filtered=%s",
+        original_tool_names,
+        filtered_tool_names,
     )
-    if tool_choice and tool_choice.get("mode") == "forced" and tool_choice.get("forced_name"):
-        base_content += f" You must call the tool '{tool_choice['forced_name']}' before giving the final answer."
-    if tool_choice and tool_choice.get("mode") == "required":
-        base_content += " You must call at least one tool before giving the final answer."
-    return {"role": "system", "content": base_content}
+
+    return filtered
 
 
 def has_system_message(messages: List[Dict[str, Any]]) -> bool:
@@ -308,6 +381,298 @@ def make_openai_tool_call(raw_tool_call: Dict[str, Any]) -> Dict[str, Any]:
             "arguments": arguments_str,
         },
     }
+
+
+def unwrap_tool_argument_value(value: Any) -> Any:
+    """
+    Some local models return tool arguments as schema-like objects, e.g.
+
+        {"description": "", "type": "string", "value": "hello"}
+
+    OpenCode expects the actual primitive value, not the schema object.
+    """
+    if isinstance(value, dict):
+        if "value" in value:
+            return value.get("value")
+
+        keys = set(value.keys())
+        if (
+            keys == {"description", "type"}
+            and value.get("type") == "string"
+            and isinstance(value.get("description"), str)
+        ):
+            return value.get("description")
+
+    return value
+
+
+def unwrap_tool_argument_value_for_field(
+    field_name: str,
+    value: Any,
+    behavior_flags: Optional[Dict[str, Any]] = None,
+) -> Any:
+    if isinstance(value, dict):
+        if "value" in value:
+            return value.get("value")
+
+        keys = set(value.keys())
+
+        if (
+            is_behavior_enabled(behavior_flags, "enable_schema_description_unwrap")
+            and
+            field_name == "content"
+            and keys == {"description", "type"}
+            and value.get("type") == "string"
+            and isinstance(value.get("description"), str)
+        ):
+            return value.get("description")
+
+        if field_name in {"path", "filePath", "file_path", "filename"}:
+            return None
+
+    return value
+
+
+def normalize_placeholder_path(
+    path_value: Any,
+    behavior_flags: Optional[Dict[str, Any]] = None,
+) -> Any:
+    if not isinstance(path_value, str):
+        return path_value
+
+    path_value = path_value.strip()
+
+    if not is_behavior_enabled(behavior_flags, "enable_placeholder_path_cleanup"):
+        return path_value
+
+    if path_value.startswith(".\\"):
+        return path_value[2:]
+
+    if path_value.startswith("./"):
+        return path_value[2:]
+
+    placeholders = [
+        "/path/to/",
+        "/tmp/path/to/",
+        "/absolute/path/to/",
+        "absolute/path/to/",
+        "C:\\path\\to\\",
+        "C:/path/to/",
+    ]
+
+    for prefix in placeholders:
+        if path_value.startswith(prefix):
+            return path_value[len(prefix):]
+
+    return path_value
+
+
+def get_tool_schema_properties(tool_name: str, requested_tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    for tool in requested_tools or []:
+        fn = tool.get("function", {}) or {}
+        if fn.get("name") == tool_name:
+            params = fn.get("parameters", {}) or {}
+            return params.get("properties", {}) or {}
+
+    return {}
+
+
+def is_invalid_write_path(path_value: Any) -> bool:
+    if not isinstance(path_value, str):
+        return True
+
+    trimmed = path_value.strip()
+    if not trimmed:
+        return True
+
+    lowered = trimmed.lower()
+    bad_phrases = (
+        "the absolute path to the file",
+        "must be absolute",
+        "description",
+        "the path",
+    )
+    return any(phrase in lowered for phrase in bad_phrases)
+
+
+def sanitize_write_arguments(
+    arguments: Any,
+    requested_tools: Optional[List[Dict[str, Any]]] = None,
+    behavior_flags: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Sanitize arguments for OpenCode's write tool.
+    """
+    try:
+        args = json.loads(arguments) if isinstance(arguments, str) else arguments
+    except Exception:
+        return arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
+
+    if not isinstance(args, dict):
+        return json.dumps({}, ensure_ascii=False)
+
+    unwrapped = {
+        key: unwrap_tool_argument_value_for_field(key, value, behavior_flags)
+        for key, value in args.items()
+    }
+
+    file_path = (
+        unwrapped.get("filePath")
+        or unwrapped.get("file_path")
+        or unwrapped.get("path")
+        or unwrapped.get("filename")
+    )
+    file_path = normalize_placeholder_path(file_path, behavior_flags)
+
+    content = unwrapped.get("content", "")
+    if not isinstance(file_path, str):
+        file_path = ""
+
+    if content is None:
+        content = ""
+
+    if not isinstance(content, str):
+        content = json.dumps(content, ensure_ascii=False)
+
+    write_props = get_tool_schema_properties("write", requested_tools)
+    clean_args: Dict[str, Any] = {}
+
+    if "path" in write_props:
+        clean_args["path"] = file_path
+    elif "filePath" in write_props:
+        clean_args["filePath"] = file_path
+    else:
+        clean_args["filePath"] = file_path
+
+    clean_args["content"] = content
+
+    path_value = clean_args.get("path") or clean_args.get("filePath")
+    content_value = clean_args.get("content")
+
+    if not isinstance(path_value, str):
+        path_value = ""
+
+    if not isinstance(content_value, str):
+        content_value = json.dumps(content_value, ensure_ascii=False)
+
+    if "path" in clean_args:
+        clean_args["path"] = path_value
+    if "filePath" in clean_args:
+        clean_args["filePath"] = path_value
+    clean_args["content"] = content_value
+
+    return json.dumps(clean_args, ensure_ascii=False)
+
+
+def sanitize_tool_arguments(
+    tool_name: str,
+    arguments: Any,
+    requested_tools: Optional[List[Dict[str, Any]]] = None,
+    behavior_flags: Optional[Dict[str, Any]] = None,
+) -> str:
+    if tool_name == "write":
+        return sanitize_write_arguments(arguments, requested_tools, behavior_flags)
+
+    try:
+        args = json.loads(arguments) if isinstance(arguments, str) else arguments
+    except Exception:
+        return arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False)
+
+    if not isinstance(args, dict):
+        return json.dumps(args, ensure_ascii=False)
+
+    cleaned = {
+        key: unwrap_tool_argument_value_for_field(key, value, behavior_flags)
+        for key, value in args.items()
+    }
+
+    for key in ("path", "filePath", "file_path", "filename"):
+        if key in cleaned:
+            cleaned[key] = normalize_placeholder_path(cleaned[key], behavior_flags)
+
+    return json.dumps(cleaned, ensure_ascii=False)
+
+
+def normalize_tool_calls(
+    tool_calls: List[Dict[str, Any]],
+    requested_tools: Optional[List[Dict[str, Any]]] = None,
+    behavior_flags: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            continue
+
+        fn = tool_call.get("function", {}) or {}
+        name = fn.get("name") or tool_call.get("name") or ""
+        arguments = fn.get("arguments")
+        if arguments is None:
+            arguments = tool_call.get("arguments")
+        if arguments is None:
+            arguments = "{}"
+
+        arguments = sanitize_tool_arguments(name, arguments, requested_tools, behavior_flags)
+        if name == "write":
+            try:
+                parsed_arguments = json.loads(arguments)
+            except Exception:
+                parsed_arguments = {}
+
+            if not isinstance(parsed_arguments, dict):
+                logger.info("discarding_write_tool_call_invalid_path arguments=%s", arguments)
+                continue
+
+            path_value = parsed_arguments.get("path")
+            if path_value is None:
+                path_value = parsed_arguments.get("filePath")
+            content_value = parsed_arguments.get("content")
+
+            if is_invalid_write_path(path_value) or not isinstance(content_value, str):
+                logger.info("discarding_write_tool_call_invalid_path arguments=%s", arguments)
+                continue
+
+        logger.info(
+            "tool_call_arguments_sanitized name=%s arguments=%s",
+            name,
+            arguments,
+        )
+
+        normalized.append(
+            {
+                "id": tool_call.get("id") or f"call_{uuid.uuid4().hex}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": arguments,
+                },
+            }
+        )
+
+    return normalized
+
+
+def normalize_tool_calls_for_stream(
+    tool_calls: List[Dict[str, Any]],
+    requested_tools: Optional[List[Dict[str, Any]]] = None,
+    behavior_flags: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+
+    for index, tool_call in enumerate(normalize_tool_calls(tool_calls, requested_tools, behavior_flags)):
+        normalized.append(
+            {
+                "index": index,
+                "id": tool_call["id"],
+                "type": "function",
+                "function": {
+                    "name": tool_call["function"]["name"],
+                    "arguments": tool_call["function"]["arguments"],
+                },
+            }
+        )
+
+    return normalized
 
 
 def strip_wrapping_code_fence(text: str) -> str:
@@ -572,10 +937,55 @@ def extract_tool_calls_from_content(
     return results
 
 
+def extract_pseudo_write_call(
+    content: str,
+    requested_tools: Optional[List[Dict[str, Any]]],
+    behavior_flags: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    if not content or not is_behavior_enabled(
+        behavior_flags,
+        "enable_pseudo_tool_extraction",
+        ENABLE_PSEUDO_TOOL_EXTRACTION,
+    ):
+        return []
+
+    tool_names = {
+        tool.get("function", {}).get("name")
+        for tool in requested_tools or []
+        if isinstance(tool, dict)
+    }
+
+    if "write" not in tool_names:
+        return []
+
+    pattern = r"write\s*\(\s*(['\"])(.*?)\1\s*,\s*(['\"])(.*?)\3\s*\)"
+    match = re.search(pattern, content, re.DOTALL)
+    if not match:
+        return []
+
+    raw_args = {
+        "filePath": match.group(2),
+        "content": match.group(4),
+    }
+    arguments = sanitize_write_arguments(raw_args, requested_tools, behavior_flags)
+
+    return [
+        {
+            "id": f"call_{uuid.uuid4().hex}",
+            "type": "function",
+            "function": {
+                "name": "write",
+                "arguments": arguments,
+            },
+        }
+    ]
+
+
 def extract_tool_calls(
     raw_message: Dict[str, Any],
     available_tools: List[Dict[str, Any]],
     tool_choice: Optional[Dict[str, Any]] = None,
+    behavior_flags: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     raw_tool_calls = raw_message.get("tool_calls") or []
     if isinstance(raw_tool_calls, list) and raw_tool_calls:
@@ -594,22 +1004,41 @@ def extract_tool_calls(
         return [normalized] if normalized else []
 
     content = raw_message.get("content", "") or ""
-    return extract_tool_calls_from_content(str(content), available_tools, tool_choice)
+    extracted = extract_tool_calls_from_content(str(content), available_tools, tool_choice)
+    if extracted:
+        return extracted
+
+    pseudo_tool_calls = extract_pseudo_write_call(str(content), available_tools, behavior_flags)
+    if pseudo_tool_calls:
+        logger.info(
+            "pseudo_tool_extraction extracted_tool_calls=True extracted_names=%s",
+            [tool_call["function"]["name"] for tool_call in pseudo_tool_calls],
+        )
+        return pseudo_tool_calls
+
+    return []
 
 
 def build_chat_completion_response(
     model: str,
     message: Dict[str, Any],
     finish_reason: str = "stop",
+    requested_tools: Optional[List[Dict[str, Any]]] = None,
+    behavior_flags: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    normalized_tool_calls = normalize_tool_calls(
+        message.get("tool_calls") or [],
+        requested_tools,
+        behavior_flags,
+    )
     response_message = {
         "role": "assistant",
         "content": message.get("content", ""),
     }
 
-    if message.get("tool_calls"):
-        response_message["content"] = message.get("content") or None
-        response_message["tool_calls"] = message["tool_calls"]
+    if normalized_tool_calls:
+        response_message["content"] = None
+        response_message["tool_calls"] = normalized_tool_calls
 
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
@@ -635,18 +1064,24 @@ def make_stream_chunk(
     content: Optional[str] = None,
     finish_reason: Optional[str] = None,
     tool_calls: Optional[List[Dict[str, Any]]] = None,
+    role: Optional[str] = None,
+    model: Optional[str] = None,
+    chat_id: Optional[str] = None,
+    created: Optional[int] = None,
 ) -> str:
     delta: Dict[str, Any] = {}
 
+    if role is not None:
+        delta["role"] = role
     if content is not None:
         delta["content"] = content
     if tool_calls is not None:
         delta["tool_calls"] = tool_calls
 
     chunk = {
-        "id": f"chatcmpl-{uuid.uuid4().hex}",
+        "id": chat_id or f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion.chunk",
-        "created": int(time.time()),
+        "created": created if created is not None else int(time.time()),
         "choices": [
             {
                 "delta": delta,
@@ -655,7 +1090,49 @@ def make_stream_chunk(
             }
         ],
     }
+    if model is not None:
+        chunk["model"] = model
     return "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
+
+
+async def stream_tool_call_chunks(
+    tool_calls: List[Dict[str, Any]],
+    model: str,
+    requested_tools: Optional[List[Dict[str, Any]]] = None,
+    behavior_flags: Optional[Dict[str, Any]] = None,
+) -> AsyncIterator[str]:
+    chat_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    normalized_tool_calls = normalize_tool_calls_for_stream(
+        tool_calls,
+        requested_tools,
+        behavior_flags,
+    )
+
+    logger.info("tool_call_stream_start model=%s tool_call_count=%s", model, len(normalized_tool_calls))
+    logger.info("tool_call_stream_normalized=%s", normalized_tool_calls)
+
+    yield make_stream_chunk(
+        role="assistant",
+        model=model,
+        chat_id=chat_id,
+        created=created,
+    )
+    yield make_stream_chunk(
+        tool_calls=normalized_tool_calls,
+        model=model,
+        chat_id=chat_id,
+        created=created,
+    )
+    yield make_stream_chunk(
+        finish_reason="tool_calls",
+        model=model,
+        chat_id=chat_id,
+        created=created,
+    )
+    yield "data: [DONE]\n\n"
+
+    logger.info("tool_call_stream_done model=%s", model)
 
 
 def parse_tool_message_content(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -745,16 +1222,21 @@ async def run_chat_with_native_tools(
     messages: List[Dict[str, Any]],
     tools: List[Dict[str, Any]],
     tool_choice: Optional[Dict[str, Any]] = None,
+    ollama_tool_choice: Any = None,
     execution_mode: str = "server",
     max_iterations: int = TOOL_MAX_ITERATIONS,
+    behavior_flags: Optional[Dict[str, Any]] = None,
     request_id: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], int, str]:
     async with httpx.AsyncClient(timeout=float(OLLAMA_CHAT_TIMEOUT_SECONDS)) as client:
-        history = list(messages)
+        tools_for_ollama = filter_tools_for_local_models(tools, behavior_flags)
+        history = inject_tool_use_system_prompt(messages, tools_for_ollama, behavior_flags)
         parsed_choice = tool_choice or {"mode": "auto", "forced_name": None}
 
-        if tools and not has_system_message(history):
-            history.insert(0, build_tool_system_message(parsed_choice))
+        logger.info(
+            "system_tool_prompt_injected=%s",
+            bool(tools_for_ollama) and is_behavior_enabled(behavior_flags, "enable_tool_prompt"),
+        )
 
         if parsed_choice.get("mode") == "none":
             response = await client.post(
@@ -780,8 +1262,10 @@ async def run_chat_with_native_tools(
                 "stream": False,
             }
 
-            if tools:
-                payload["tools"] = tools
+            if tools_for_ollama:
+                payload["tools"] = tools_for_ollama
+                if ollama_tool_choice is not None:
+                    payload["tool_choice"] = ollama_tool_choice
 
             response = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
             response.raise_for_status()
@@ -795,7 +1279,7 @@ async def run_chat_with_native_tools(
                 isinstance(raw_message.get("function_call"), dict),
                 (raw_message.get("content", "") or "")[:300],
             )
-            extracted_tool_calls = extract_tool_calls(raw_message, tools, parsed_choice)
+            extracted_tool_calls = extract_tool_calls(raw_message, tools, parsed_choice, behavior_flags)
             logger.info(
                 "tool_extraction execution_mode=%s extracted_tool_calls=%s extracted_names=%s",
                 execution_mode,
@@ -827,7 +1311,7 @@ async def run_chat_with_native_tools(
                 final_message = reconcile_final_message_with_tool_results(final_message, history)
                 return final_message, history, iteration, "stop"
 
-            openai_tool_calls = [make_openai_tool_call(tool_call) for tool_call in extracted_tool_calls]
+            openai_tool_calls = normalize_tool_calls(extracted_tool_calls, tools, behavior_flags)
 
             history.append(
                 {

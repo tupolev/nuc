@@ -120,6 +120,9 @@ Important notes:
 - if you change `API_KEY_SECRET` or `API_KEY_SALT`, existing API keys will stop matching
 - the safe default is `TOOL_EXECUTION_MODE=client`
 - keep `AUTO_ENABLE_LOCAL_TOOLS=false` unless you intentionally want server-side tool execution
+- `LOCAL_MODEL_FORCE_TOOL_CHOICE=1` forces `tool_choice="required"` only for `opencode` and `coding-agent` profiles
+- `LOCAL_MODEL_FILTER_TOOLS=1` forwards only coding-oriented tools to local models, and only for `opencode` and `coding-agent`
+- `LOCAL_MODEL_PSEUDO_TOOL_EXTRACTION=1` allows the adapter to recover a narrow pseudo-call such as `write("file.txt", "content")`, and only for `opencode` and `coding-agent`
 
 ## Tool Execution Safety
 
@@ -146,6 +149,73 @@ About `/workspace`:
 - `/workspace` is the adapter's server-side sandbox for local tools, tests, and end-to-end fixtures
 - it is still useful for `tool_execution_mode=server` and for validating the adapter itself
 - it is not the desired destination for generated project code when OpenCode or another agent is running on the client machine with its own file tools
+
+## Agent Profiles
+
+The adapter now detects a small client profile for each `/v1/chat/completions` request and uses it to decide whether OpenCode-oriented heuristics should run.
+
+Supported profiles:
+
+- `opencode`
+- `coding-agent`
+- `openwebui`
+- `generic`
+
+Alias mapping:
+
+- `codex` -> `coding-agent`
+- `claude-code` -> `coding-agent`
+
+Detection order:
+
+1. explicit headers
+2. request `metadata`
+3. tool-name heuristic
+4. fallback to `generic`
+
+Explicit headers recognized by the adapter:
+
+- `X-Agent-Client`
+- `X-LLM-Agent`
+- `X-Adapter-Agent-Profile`
+
+Supported `metadata` keys:
+
+- `metadata.agent_client`
+- `metadata.agent_profile`
+- `metadata.client`
+
+OpenCode heuristic detection:
+
+- if the tool list overlaps strongly with OpenCode markers such as `bash`, `read`, `glob`, `grep`, `edit`, `write`, `task`, `webfetch`, `todowrite`, and `skill`, the adapter infers `opencode`
+
+Profile-gated behavior:
+
+- `opencode` and `coding-agent` enable the stronger tool-use system prompt
+- `opencode` and `coding-agent` can enable local-tool filtering through `LOCAL_MODEL_FILTER_TOOLS=1`
+- `opencode` and `coding-agent` can enable forced `tool_choice="required"` through `LOCAL_MODEL_FORCE_TOOL_CHOICE=1`
+- `opencode` and `coding-agent` can enable the narrow pseudo-`write(...)` fallback through `LOCAL_MODEL_PSEUDO_TOOL_EXTRACTION=1`
+- placeholder path cleanup and malformed schema-description unwrapping are restricted to `opencode` and `coding-agent`
+
+Always-on compatibility behavior for all profiles:
+
+- non-stream tool calls return `content: null` and `finish_reason: "tool_calls"`
+- streaming tool calls include the initial `delta.role = "assistant"` chunk
+- all chunks in one tool-call stream share the same `chatcmpl-*` id
+- all chunks include the requested `model`
+- `delta.tool_calls[]` items include `index`
+- tool-call streams end with `finish_reason: "tool_calls"` and `data: [DONE]`
+- `function.arguments` is always returned as a JSON string
+
+Example explicit profile header for OpenCode-like clients:
+
+```json
+{
+  "headers": {
+    "X-Agent-Client": "opencode"
+  }
+}
+```
 
 ## Agent Skills
 
@@ -176,6 +246,7 @@ Why this matters:
 - some local models will otherwise burn turns on planning or pseudo-skill flows instead of creating or editing the requested file
 - for short coding tasks, denying those meta-tools improves the chance that the model goes straight to `write`/`edit`/`bash`
 - if you need a richer planning workflow later, you can relax those denies for stronger models or longer tasks
+- if OpenCode can send custom headers, set `X-Agent-Client: opencode` so the adapter can enable the OpenCode profile explicitly instead of relying on tool-name heuristics
 
 ## Start the Stack
 
@@ -293,6 +364,8 @@ journalctl -u ollama -b --no-pager
 
 Current tuning:
 
+- `OLLAMA_HOST=0.0.0.0:11434`
+  Makes the host Ollama API reachable from the Dockerized adapter via `host.docker.internal`.
 - `OLLAMA_KEEP_ALIVE=30m`
   Keeps the model loaded for 30 minutes after the last request.
 - `OLLAMA_MAX_LOADED_MODELS=1`

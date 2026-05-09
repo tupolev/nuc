@@ -23,6 +23,7 @@ journalctl -u ollama -b --no-pager
 
 Current tuning values:
 
+- `OLLAMA_HOST=0.0.0.0:11434`
 - `OLLAMA_KEEP_ALIVE=30m`
 - `OLLAMA_MAX_LOADED_MODELS=1`
 - `OLLAMA_NUM_PARALLEL=1`

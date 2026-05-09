@@ -19,6 +19,9 @@ from config import (
     CHAT_CONCURRENCY,
     DEFAULT_MODEL,
     EMBED_CONCURRENCY,
+    ENABLE_PSEUDO_TOOL_EXTRACTION,
+    FILTER_TOOLS_FOR_LOCAL_MODELS,
+    FORCE_TOOL_CHOICE,
     OLLAMA_URL,
     QUEUE_TIMEOUT,
     TOOL_EXECUTION_MODE,
@@ -29,8 +32,10 @@ from openai_compat import (
     make_stream_chunk,
     normalize_execution_mode,
     normalize_openai_messages,
+    normalize_tool_calls,
     normalize_tool_choice,
     run_chat_with_native_tools,
+    stream_tool_call_chunks,
     to_ollama_messages,
 )
 from tooling import TOOL_REGISTRY, build_all_tool_specs, execute_tool_call
@@ -43,6 +48,118 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
+
+AGENT_PROFILE_ALIASES = {
+    "opencode": "opencode",
+    "coding-agent": "coding-agent",
+    "codex": "coding-agent",
+    "claude-code": "coding-agent",
+    "openwebui": "openwebui",
+    "generic": "generic",
+}
+
+AGENT_PROFILE_HEADERS = [
+    "x-agent-client",
+    "x-llm-agent",
+    "x-adapter-agent-profile",
+]
+
+OPENCODE_TOOL_MARKERS = {
+    "question",
+    "bash",
+    "read",
+    "glob",
+    "grep",
+    "edit",
+    "write",
+    "task",
+    "webfetch",
+    "todowrite",
+    "skill",
+}
+
+
+def normalize_agent_profile(value):
+    if not value:
+        return None
+
+    normalized = str(value).strip().lower()
+    return AGENT_PROFILE_ALIASES.get(normalized)
+
+
+def detect_agent_profile_from_metadata(body):
+    metadata = body.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return None
+
+    for key in ("agent_client", "agent_profile", "client"):
+        profile = normalize_agent_profile(metadata.get(key))
+        if profile:
+            return profile
+
+    return None
+
+
+def detect_agent_profile_from_tools(body):
+    tools = body.get("tools") or []
+    tool_names = {
+        tool.get("function", {}).get("name")
+        for tool in tools
+        if isinstance(tool, dict)
+    }
+    tool_names.discard(None)
+
+    if len(tool_names & OPENCODE_TOOL_MARKERS) >= 6:
+        return "opencode"
+
+    return None
+
+
+def detect_agent_profile(request: Request, body: dict) -> str:
+    for header_name in AGENT_PROFILE_HEADERS:
+        profile = normalize_agent_profile(request.headers.get(header_name))
+        if profile:
+            return profile
+
+    profile = detect_agent_profile_from_metadata(body)
+    if profile:
+        return profile
+
+    profile = detect_agent_profile_from_tools(body)
+    if profile:
+        return profile
+
+    return "generic"
+
+
+def detect_agent_profile_with_source(request: Request, body: dict):
+    for header_name in AGENT_PROFILE_HEADERS:
+        profile = normalize_agent_profile(request.headers.get(header_name))
+        if profile:
+            return profile, f"header:{header_name}"
+
+    profile = detect_agent_profile_from_metadata(body)
+    if profile:
+        return profile, "metadata"
+
+    profile = detect_agent_profile_from_tools(body)
+    if profile:
+        return profile, "tools"
+
+    return "generic", "fallback"
+
+
+def get_agent_behavior_flags(agent_profile: str) -> dict:
+    is_opencode_like = agent_profile in {"opencode", "coding-agent"}
+
+    return {
+        "enable_tool_prompt": is_opencode_like,
+        "enable_tool_filtering": is_opencode_like and FILTER_TOOLS_FOR_LOCAL_MODELS,
+        "enable_pseudo_tool_extraction": is_opencode_like and ENABLE_PSEUDO_TOOL_EXTRACTION,
+        "enable_placeholder_path_cleanup": is_opencode_like,
+        "enable_schema_description_unwrap": is_opencode_like,
+        "force_tool_choice": is_opencode_like and FORCE_TOOL_CHOICE,
+    }
 
 
 @app.middleware("http")
@@ -194,10 +311,23 @@ async def chat(request: Request, req: dict):
 
     model = req.get("model", DEFAULT_MODEL)
     messages = normalize_openai_messages(req.get("messages", []))
+    roles = [message.get("role") for message in messages or []]
+    logger.info("chat_request_roles=%s", roles)
+    for message in messages or []:
+        if message.get("role") == "tool":
+            logger.info(
+                "tool_result_message tool_call_id=%s content_preview=%s",
+                message.get("tool_call_id"),
+                str(message.get("content"))[:500],
+            )
     raw_execution_mode = req.get("tool_execution_mode")
     explicit_server_requested = str(raw_execution_mode or "").strip().lower() == "server"
     execution_mode = normalize_execution_mode(raw_execution_mode if raw_execution_mode is not None else TOOL_EXECUTION_MODE)
     requested_tools = req.get("tools") or []
+    agent_profile, agent_profile_source = detect_agent_profile_with_source(request, req)
+    behavior_flags = get_agent_behavior_flags(agent_profile)
+    logger.info("agent_profile_detected=%s source=%s", agent_profile, agent_profile_source)
+    logger.info("agent_behavior_flags=%s", behavior_flags)
     requested_tool_names = []
     if isinstance(requested_tools, list):
         for tool in requested_tools:
@@ -207,6 +337,12 @@ async def chat(request: Request, req: dict):
             name = fn.get("name")
             if isinstance(name, str) and name:
                 requested_tool_names.append(name)
+    logger.info(
+        "tools_present=%s requested_tool_names=%s stream=%s",
+        bool(requested_tools),
+        requested_tool_names,
+        bool(req.get("stream", False)),
+    )
     tools = build_effective_tools(
         requested_tools,
         req.get("functions"),
@@ -214,16 +350,32 @@ async def chat(request: Request, req: dict):
         allow_auto_server_tools=explicit_server_requested,
     )
     effective_tool_names = [tool.get("function", {}).get("name") for tool in tools if isinstance(tool, dict)]
+    incoming_tool_choice = req.get("tool_choice")
+    effective_tool_choice = "required" if behavior_flags["force_tool_choice"] and tools else incoming_tool_choice
+    logger.info(
+        "system_tool_prompt_injected=%s",
+        bool(tools) and behavior_flags["enable_tool_prompt"],
+    )
+    logger.info(
+        "tool_choice_config tools_present=%s incoming=%s effective=%s force=%s",
+        bool(tools),
+        incoming_tool_choice,
+        effective_tool_choice,
+        behavior_flags["force_tool_choice"],
+    )
     logger.info(
         "chat_request mode_raw=%s mode_effective=%s requested_tools=%s effective_tools=%s tool_choice=%s stream=%s",
         raw_execution_mode,
         execution_mode,
         requested_tool_names,
         effective_tool_names,
-        req.get("tool_choice", "auto"),
+        effective_tool_choice if effective_tool_choice is not None else "auto",
         bool(req.get("stream", False)),
     )
-    tool_choice = normalize_tool_choice(req.get("tool_choice", "auto"), tools)
+    tool_choice = normalize_tool_choice(
+        effective_tool_choice if effective_tool_choice is not None else "auto",
+        tools,
+    )
     stream = bool(req.get("stream", False))
 
     start_time = time.time()
@@ -240,7 +392,9 @@ async def chat(request: Request, req: dict):
                     messages=messages,
                     tools=tools,
                     tool_choice=tool_choice,
+                    ollama_tool_choice=effective_tool_choice,
                     execution_mode=execution_mode,
+                    behavior_flags=behavior_flags,
                     request_id=request_id,
                 )
             except RuntimeError as exc:
@@ -255,6 +409,29 @@ async def chat(request: Request, req: dict):
             state.close_session(request_id, final_result=final_message)
 
             if stream:
+                if final_message.get("tool_calls"):
+                    normalized_tool_calls = normalize_tool_calls(
+                        final_message["tool_calls"],
+                        tools,
+                        behavior_flags,
+                    )
+                    logger.info(
+                        "tool_call_stream_dispatch model=%s tool_call_count=%s",
+                        model,
+                        len(normalized_tool_calls),
+                    )
+                    final_message["tool_calls"] = normalized_tool_calls
+                    return StreamingResponse(
+                        stream_tool_call_chunks(
+                            final_message["tool_calls"],
+                            model,
+                            tools,
+                            behavior_flags,
+                        ),
+                        media_type="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+                    )
+
                 async def tool_stream_generator():
                     if final_message.get("tool_calls"):
                         yield make_stream_chunk(tool_calls=final_message["tool_calls"])
@@ -271,11 +448,25 @@ async def chat(request: Request, req: dict):
                     headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
                 )
 
+            if final_message.get("tool_calls"):
+                final_message["tool_calls"] = normalize_tool_calls(
+                    final_message["tool_calls"],
+                    tools,
+                    behavior_flags,
+                )
+                logger.info(
+                    "tool_call_non_stream_response model=%s tool_call_count=%s",
+                    model,
+                    len(final_message["tool_calls"]),
+                )
+
             return JSONResponse(
                 build_chat_completion_response(
                     model=model,
                     message=final_message,
                     finish_reason=finish_reason,
+                    requested_tools=tools,
+                    behavior_flags=behavior_flags,
                 )
             )
 
@@ -377,9 +568,13 @@ async def embeddings(request: Request, req: dict):
 
 @app.get("/v1/models")
 async def models():
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.get(f"{OLLAMA_URL}/api/tags")
-        response.raise_for_status()
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(f"{OLLAMA_URL}/api/tags")
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        state.METRICS["errors"] += 1
+        return JSONResponse(status_code=502, content={"error": f"ollama error: {exc}"})
 
     models_data = response.json().get("models", [])
     return {

@@ -26,6 +26,18 @@ SHELL_TIMEOUT = int(os.getenv("SHELL_TIMEOUT", "20"))
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen2.5-coder:7b")
 TOOL_EXECUTION_MODE = os.getenv("TOOL_EXECUTION_MODE", "client").strip().lower()
 AUTO_ENABLE_LOCAL_TOOLS = os.getenv("AUTO_ENABLE_LOCAL_TOOLS", "false").strip().lower() == "true"
+FORCE_TOOL_CHOICE = (
+    os.getenv("LOCAL_MODEL_FORCE_TOOL_CHOICE", os.getenv("OPENCODE_FORCE_TOOL_CHOICE", "0")) == "1"
+)
+FILTER_TOOLS_FOR_LOCAL_MODELS = (
+    os.getenv("LOCAL_MODEL_FILTER_TOOLS", os.getenv("OPENCODE_FILTER_TOOLS_FOR_LOCAL_MODELS", "0")) == "1"
+)
+ENABLE_PSEUDO_TOOL_EXTRACTION = (
+    os.getenv(
+        "LOCAL_MODEL_PSEUDO_TOOL_EXTRACTION",
+        os.getenv("OPENCODE_ENABLE_PSEUDO_TOOL_EXTRACTION", "1"),
+    ) == "1"
+)
 SAFE_SHELL_COMMANDS = {
     item.strip()
     for item in os.getenv(
