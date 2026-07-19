@@ -156,6 +156,7 @@ def get_agent_behavior_flags(agent_profile: str) -> dict:
         "enable_tool_prompt": is_opencode_like,
         "enable_tool_filtering": is_opencode_like and FILTER_TOOLS_FOR_LOCAL_MODELS,
         "enable_pseudo_tool_extraction": is_opencode_like and ENABLE_PSEUDO_TOOL_EXTRACTION,
+        "enable_textual_json_tool_extraction": is_opencode_like and ENABLE_PSEUDO_TOOL_EXTRACTION,
         "enable_placeholder_path_cleanup": is_opencode_like,
         "enable_schema_description_unwrap": is_opencode_like,
         "force_tool_choice": is_opencode_like and FORCE_TOOL_CHOICE,
@@ -420,17 +421,21 @@ async def chat(request: Request, req: dict):
                         model,
                         len(normalized_tool_calls),
                     )
-                    final_message["tool_calls"] = normalized_tool_calls
-                    return StreamingResponse(
-                        stream_tool_call_chunks(
-                            final_message["tool_calls"],
-                            model,
-                            tools,
-                            behavior_flags,
-                        ),
-                        media_type="text/event-stream",
-                        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-                    )
+                    if normalized_tool_calls:
+                        final_message["tool_calls"] = normalized_tool_calls
+                        return StreamingResponse(
+                            stream_tool_call_chunks(
+                                final_message["tool_calls"],
+                                model,
+                                tools,
+                                behavior_flags,
+                            ),
+                            media_type="text/event-stream",
+                            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+                        )
+                    logger.info("all_tool_calls_discarded_after_sanitization")
+                    final_message.pop("tool_calls", None)
+                    finish_reason = "stop"
 
                 async def tool_stream_generator():
                     if final_message.get("tool_calls"):
@@ -454,11 +459,16 @@ async def chat(request: Request, req: dict):
                     tools,
                     behavior_flags,
                 )
-                logger.info(
-                    "tool_call_non_stream_response model=%s tool_call_count=%s",
-                    model,
-                    len(final_message["tool_calls"]),
-                )
+                if final_message["tool_calls"]:
+                    logger.info(
+                        "tool_call_non_stream_response model=%s tool_call_count=%s",
+                        model,
+                        len(final_message["tool_calls"]),
+                    )
+                else:
+                    logger.info("all_tool_calls_discarded_after_sanitization")
+                    final_message.pop("tool_calls", None)
+                    finish_reason = "stop"
 
             return JSONResponse(
                 build_chat_completion_response(

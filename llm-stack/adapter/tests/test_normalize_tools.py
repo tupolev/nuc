@@ -6,6 +6,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from openai_compat import (
+    extract_textual_json_tool_call,
     normalize_local_openai_tools,
     normalize_passthrough_openai_tools,
     TOOL_REGISTRY,
@@ -143,3 +144,56 @@ class TestNormalizePassthroughOpenaiTools:
         assert len(result) == 1
         assert result[0]["function"]["description"] == "Does something"
         assert result[0]["function"]["parameters"]["properties"]["arg1"]["type"] == "string"
+
+
+class TestExtractTextualJsonToolCall:
+    """Tests for textual JSON write extraction."""
+
+    @staticmethod
+    def requested_write_tool():
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "filePath": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                        "required": ["filePath", "content"],
+                    },
+                },
+            }
+        ]
+
+    @staticmethod
+    def behavior_flags():
+        return {
+            "enable_pseudo_tool_extraction": True,
+            "enable_textual_json_tool_extraction": True,
+            "enable_placeholder_path_cleanup": True,
+            "enable_schema_description_unwrap": True,
+        }
+
+    def test_extracts_valid_write_call_from_textual_json(self):
+        result = extract_textual_json_tool_call(
+            '{"name":"write","arguments":{"filePath":"list.cpp","content":"int main() { return 0; }"}}',
+            requested_tools=self.requested_write_tool(),
+            behavior_flags=self.behavior_flags(),
+        )
+
+        assert len(result) == 1
+        assert result[0]["function"]["name"] == "write"
+        assert '"filePath": "list.cpp"' in result[0]["function"]["arguments"]
+        assert "int main() { return 0; }" in result[0]["function"]["arguments"]
+
+    def test_rejects_placeholder_write_call_from_textual_json(self):
+        result = extract_textual_json_tool_call(
+            '{"name":"write","arguments":{"filePath":"/path/to/file","content":"The content to write to the file."}}',
+            requested_tools=self.requested_write_tool(),
+            behavior_flags=self.behavior_flags(),
+        )
+
+        assert result == []

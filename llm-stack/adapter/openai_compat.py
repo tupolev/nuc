@@ -62,6 +62,20 @@ LOCAL_MODEL_ALLOWED_TOOLS = {
     "write",
 }
 
+INVALID_WRITE_PATH_MARKERS = [
+    "<file-path>",
+    "<absolute-file-path>",
+    "the absolute path to the file",
+    "the path to the file",
+    "file to write",
+    "must be absolute",
+]
+
+INVALID_WRITE_CONTENT_MARKERS = [
+    "the content to write to the file",
+    "content to write",
+]
+
 
 def is_behavior_enabled(
     behavior_flags: Optional[Dict[str, Any]],
@@ -495,11 +509,45 @@ def is_invalid_write_path(path_value: Any) -> bool:
     return any(phrase in lowered for phrase in bad_phrases)
 
 
+def looks_like_placeholder_text(value: Any, markers: List[str]) -> bool:
+    if not isinstance(value, str):
+        return True
+
+    normalized = value.strip().lower()
+    if not normalized:
+        return True
+
+    return any(marker in normalized for marker in markers)
+
+
+def looks_like_single_json_object(content: str) -> bool:
+    if not isinstance(content, str):
+        return False
+
+    stripped = content.strip()
+    return stripped.startswith("{") and stripped.endswith("}")
+
+
+def parse_json_object_from_content(content: str) -> Optional[Dict[str, Any]]:
+    if not looks_like_single_json_object(content):
+        return None
+
+    try:
+        parsed = json.loads(content.strip())
+    except Exception:
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    return parsed
+
+
 def sanitize_write_arguments(
     arguments: Any,
     requested_tools: Optional[List[Dict[str, Any]]] = None,
     behavior_flags: Optional[Dict[str, Any]] = None,
-) -> str:
+) -> Optional[str]:
     """
     Sanitize arguments for OpenCode's write tool.
     """
@@ -561,6 +609,23 @@ def sanitize_write_arguments(
         clean_args["filePath"] = path_value
     clean_args["content"] = content_value
 
+    path_value = clean_args.get("path") or clean_args.get("filePath")
+    content_value = clean_args.get("content")
+
+    if looks_like_placeholder_text(path_value, INVALID_WRITE_PATH_MARKERS):
+        logger.info(
+            "discarding_write_tool_call_invalid_path arguments=%s",
+            json.dumps(clean_args, ensure_ascii=False),
+        )
+        return None
+
+    if looks_like_placeholder_text(content_value, INVALID_WRITE_CONTENT_MARKERS):
+        logger.info(
+            "discarding_write_tool_call_invalid_content arguments=%s",
+            json.dumps(clean_args, ensure_ascii=False),
+        )
+        return None
+
     return json.dumps(clean_args, ensure_ascii=False)
 
 
@@ -569,7 +634,7 @@ def sanitize_tool_arguments(
     arguments: Any,
     requested_tools: Optional[List[Dict[str, Any]]] = None,
     behavior_flags: Optional[Dict[str, Any]] = None,
-) -> str:
+) -> Optional[str]:
     if tool_name == "write":
         return sanitize_write_arguments(arguments, requested_tools, behavior_flags)
 
@@ -613,6 +678,12 @@ def normalize_tool_calls(
             arguments = "{}"
 
         arguments = sanitize_tool_arguments(name, arguments, requested_tools, behavior_flags)
+        if arguments is None:
+            logger.info(
+                "discarding_tool_call name=%s reason=sanitizer_returned_none",
+                name,
+            )
+            continue
         if name == "write":
             try:
                 parsed_arguments = json.loads(arguments)
@@ -968,6 +1039,8 @@ def extract_pseudo_write_call(
         "content": match.group(4),
     }
     arguments = sanitize_write_arguments(raw_args, requested_tools, behavior_flags)
+    if arguments is None:
+        return []
 
     return [
         {
@@ -976,6 +1049,76 @@ def extract_pseudo_write_call(
             "function": {
                 "name": "write",
                 "arguments": arguments,
+            },
+        }
+    ]
+
+
+def extract_textual_json_tool_call(
+    content: str,
+    requested_tools: Optional[List[Dict[str, Any]]] = None,
+    behavior_flags: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    if not is_behavior_enabled(
+        behavior_flags,
+        "enable_textual_json_tool_extraction",
+        is_behavior_enabled(
+            behavior_flags,
+            "enable_pseudo_tool_extraction",
+            ENABLE_PSEUDO_TOOL_EXTRACTION,
+        ),
+    ):
+        return []
+
+    parsed = parse_json_object_from_content(content)
+    if not parsed:
+        return []
+
+    logger.info("textual_json_tool_extraction_candidate=True")
+
+    requested_tool_names = {
+        tool.get("function", {}).get("name")
+        for tool in requested_tools or []
+        if isinstance(tool, dict)
+    }
+
+    if "write" not in requested_tool_names:
+        return []
+
+    name = None
+    arguments = None
+
+    if parsed.get("name") == "write":
+        name = "write"
+        arguments = parsed.get("arguments")
+    elif isinstance(parsed.get("function"), dict):
+        fn = parsed.get("function") or {}
+        if fn.get("name") == "write":
+            name = "write"
+            arguments = fn.get("arguments")
+
+    if name != "write" or arguments is None:
+        return []
+
+    sanitized_arguments = sanitize_write_arguments(arguments, requested_tools, behavior_flags)
+    if sanitized_arguments is None:
+        logger.info(
+            "textual_json_tool_extraction_discarded name=write reason=sanitizer_returned_none"
+        )
+        return []
+
+    logger.info(
+        "textual_json_tool_extraction extracted_tool_calls=True extracted_names=%s",
+        ["write"],
+    )
+
+    return [
+        {
+            "id": f"call_{uuid.uuid4().hex}",
+            "type": "function",
+            "function": {
+                "name": "write",
+                "arguments": sanitized_arguments,
             },
         }
     ]
@@ -1004,6 +1147,10 @@ def extract_tool_calls(
         return [normalized] if normalized else []
 
     content = raw_message.get("content", "") or ""
+    textual_json_tool_calls = extract_textual_json_tool_call(str(content), available_tools, behavior_flags)
+    if textual_json_tool_calls:
+        return textual_json_tool_calls
+
     extracted = extract_tool_calls_from_content(str(content), available_tools, tool_choice)
     if extracted:
         return extracted
@@ -1108,6 +1255,9 @@ async def stream_tool_call_chunks(
         requested_tools,
         behavior_flags,
     )
+    if not normalized_tool_calls:
+        logger.info("no_valid_tool_calls_after_sanitization")
+        return
 
     logger.info("tool_call_stream_start model=%s tool_call_count=%s", model, len(normalized_tool_calls))
     logger.info("tool_call_stream_normalized=%s", normalized_tool_calls)
