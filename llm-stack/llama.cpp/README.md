@@ -161,6 +161,28 @@ curl --fail-with-body --cacert "$NUC_CA_CERT" \
   }' > speech.mp3
 ```
 
+## Open WebUI
+
+Open WebUI is preconfigured in `docker-compose.yml` to use the authenticated
+adapter over the private Compose network. No additional exposed ports, TLS
+exceptions, or API keys are needed in the browser.
+
+The following capabilities are enabled in the Open WebUI interface:
+
+| Interface feature | Local service | Configuration |
+| --- | --- | --- |
+| Chat and code | Qwen3 8B | Select `qwen3:8b` |
+| Image analysis | Qwen2.5-VL 3B | Select `qwen2.5-vl:3b`, then attach an image |
+| Image generation and edits | Stable Diffusion 1.5 | Image generation is enabled with model `sd-cpp-local` |
+| Dictation and transcription | faster-whisper-small | OpenAI-compatible STT with multipart audio uploads |
+| Read aloud | Kokoro-82M | Voice `ef_dora` by default |
+
+The equivalent container settings are `IMAGE_GENERATION_ENGINE=openai`,
+`AUDIO_STT_ENGINE=openai`, and `AUDIO_TTS_ENGINE=openai`; each points to
+`http://adapter:4000/v1` with `OPENWEBUI_ADAPTER_API_KEY`. If an administrator
+changes these values in Open WebUI's Admin Panel, that persisted configuration
+can override the Compose defaults.
+
 ## Operations
 
 Check service status and follow a model's startup/download logs from the NUC:
