@@ -9,6 +9,8 @@ from openai_compat import (
     extract_textual_json_tool_call,
     normalize_local_openai_tools,
     normalize_passthrough_openai_tools,
+    normalize_tool_arguments,
+    to_openai_messages,
     TOOL_REGISTRY,
 )
 
@@ -144,6 +146,55 @@ class TestNormalizePassthroughOpenaiTools:
         assert len(result) == 1
         assert result[0]["function"]["description"] == "Does something"
         assert result[0]["function"]["parameters"]["properties"]["arg1"]["type"] == "string"
+
+
+class TestNormalizeToolArguments:
+    """Tests for tolerant model-emitted tool argument normalization."""
+
+    def test_bash_commands_list_becomes_required_command_string(self):
+        result = normalize_tool_arguments(
+            "bash",
+            {"commands": ["gcc weather.c -o weather -lcurl", "./weather"]},
+        )
+
+        assert result == {"command": "gcc weather.c -o weather -lcurl && ./weather"}
+
+    def test_bash_command_list_becomes_command_string(self):
+        result = normalize_tool_arguments(
+            "bash",
+            {"command": ["git status", "git diff"]},
+        )
+
+        assert result == {"command": "git status && git diff"}
+
+    def test_bash_cmd_alias_becomes_command(self):
+        result = normalize_tool_arguments("bash", {"cmd": "./weather Madrid"})
+
+        assert result == {"command": "./weather Madrid"}
+
+
+class TestToOpenaiMessages:
+    def test_preserves_tool_call_protocol_fields(self):
+        tool_call = {
+            "id": "call_weather",
+            "type": "function",
+            "function": {"name": "bash", "arguments": '{"command":"./weather"}'},
+        }
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [tool_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "call_weather",
+                "tool_name": "bash",
+                "content": "Berlin: 15 C",
+            },
+        ]
+
+        result = to_openai_messages(messages)
+
+        assert result[0]["tool_calls"] == [tool_call]
+        assert result[1]["tool_call_id"] == "call_weather"
+        assert result[1]["name"] == "bash"
 
 
 class TestExtractTextualJsonToolCall:

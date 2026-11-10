@@ -2,7 +2,7 @@
 
 A local NUC-based LLM stack with:
 
-- Ollama on the host
+- llama.cpp as a Docker Compose service with Vulkan
 - a FastAPI adapter exposing an OpenAI-compatible API
 - Open WebUI behind Caddy
 - Prometheus and Grafana
@@ -31,7 +31,7 @@ The adapter is modularized for maintainability:
 - [`config.py`](/home/tupolev/llm-stack/adapter/config.py): environment variables and constants
 - [`state.py`](/home/tupolev/llm-stack/adapter/state.py): auth DB, queues, and metrics
 - [`tooling.py`](/home/tupolev/llm-stack/adapter/tooling.py): tools and tool registry
-- [`openai_compat.py`](/home/tupolev/llm-stack/adapter/openai_compat.py): OpenAI/Ollama compatibility and tool calling
+- [`openai_compat.py`](/home/tupolev/llm-stack/adapter/openai_compat.py): OpenAI-compatible backend and tool calling
 
 Agent-facing skills live under [`llm-stack/skills/`](/home/tupolev/llm-stack/skills). These are not Python handlers inside the adapter. They are instruction files intended for coding agents so the agent can follow local conventions when deciding how to use tools. The current example is [`skills/Bash/SKILL.md`](/home/tupolev/llm-stack/skills/Bash/SKILL.md), which tells the agent to use OpenCode's built-in `bash`, `write`, and `edit` tools instead of inventing a fake "Bash" skill or emitting JSON-like tool calls in plain text.
 
@@ -46,14 +46,14 @@ Client
     -> /* -> open-webui:8080
 
 adapter
-  -> Ollama on host.docker.internal:11434
+  -> llama-server:8080/v1
   -> /data/auth.db
   -> /data/files
   -> /workspace
 
 Prometheus
   -> scrape adapter:4000/metrics/prometheus
-  -> scrape ollama-exporter:9101
+  -> scrape llama-server:8080
   -> scrape host.docker.internal:9100
 
 Grafana
@@ -73,21 +73,16 @@ The installer is intended to:
 1. update the system
 2. install dependencies such as `git`, `curl`, and `sqlite3`
 3. install Docker and Docker Compose
-4. verify that host Ollama is already installed as `ollama.service`
-5. clone the project into `/opt/llm-stack`
-6. create the auth database and local `.env`
-7. apply the versioned Ollama systemd tuning
-8. build and start the containers
-9. configure systemd services
-10. enable autostart
-11. warm up Ollama models
+4. clone the project into `/opt/llm-stack`
+5. create the auth database and local `.env`
+6. build and start the containers, including llama.cpp
+7. configure and enable the stack systemd service
 
 ## Manual Requirements
 
 If you are not using the installer, you need:
 
 - Docker and Docker Compose
-- Ollama reachable from the host
 - valid Caddy certificates and config for `nuc.fritz.box`
 - a local `.env` file with real values
 
@@ -104,7 +99,7 @@ cp .env.example .env
 
 Then edit `.env` and fill in at least:
 
-- `OLLAMA_URL`
+- `LLM_BASE_URL`
 - `AUTH_DB_PATH`
 - `FILES_DIR`
 - `API_KEY_SECRET`
@@ -120,7 +115,7 @@ Important notes:
 - if you change `API_KEY_SECRET` or `API_KEY_SALT`, existing API keys will stop matching
 - the safe default is `TOOL_EXECUTION_MODE=client`
 - keep `AUTO_ENABLE_LOCAL_TOOLS=false` unless you intentionally want server-side tool execution
-- `LOCAL_MODEL_FORCE_TOOL_CHOICE=1` forces `tool_choice="required"` only for `opencode` and `coding-agent` profiles
+- `LOCAL_MODEL_FORCE_TOOL_CHOICE=0` is the recommended default. Forcing every request to call a tool can prevent OpenCode from compacting a session.
 - `LOCAL_MODEL_FILTER_TOOLS=1` forwards only coding-oriented tools to local models, and only for `opencode` and `coding-agent`
 - `LOCAL_MODEL_PSEUDO_TOOL_EXTRACTION=1` allows the adapter to recover a narrow pseudo-call such as `write("file.txt", "content")`, and only for `opencode` and `coding-agent`
 
@@ -193,7 +188,7 @@ Profile-gated behavior:
 
 - `opencode` and `coding-agent` enable the stronger tool-use system prompt
 - `opencode` and `coding-agent` can enable local-tool filtering through `LOCAL_MODEL_FILTER_TOOLS=1`
-- `opencode` and `coding-agent` can enable forced `tool_choice="required"` through `LOCAL_MODEL_FORCE_TOOL_CHOICE=1`
+- `opencode` and `coding-agent` can opt into forced `tool_choice="required"` through `LOCAL_MODEL_FORCE_TOOL_CHOICE=1`; leave it disabled for normal OpenCode sessions.
 - `opencode` and `coding-agent` can enable the narrow pseudo-`write(...)` fallback through `LOCAL_MODEL_PSEUDO_TOOL_EXTRACTION=1`
 - placeholder path cleanup and malformed schema-description unwrapping are restricted to `opencode` and `coding-agent`
 
@@ -248,11 +243,43 @@ Why this matters:
 - if you need a richer planning workflow later, you can relax those denies for stronger models or longer tasks
 - if OpenCode can send custom headers, set `X-Agent-Client: opencode` so the adapter can enable the OpenCode profile explicitly instead of relying on tool-name heuristics
 
+### macOS Client
+
+Point OpenCode at the adapter, never at `llama-server` directly. The selectable
+model is `nuc/qwen3`, which sends `qwen3:8b` to the NUC.
+
+The NUC certificate is signed by its local mkcert CA. Copy its public root
+certificate to the Mac and trust it in the system keychain:
+
+```bash
+mkdir -p ~/.config/opencode/certs
+scp tupolev@nuc.fritz.box:/home/tupolev/.local/share/mkcert/rootCA.pem \
+  ~/.config/opencode/certs/nuc-mkcert-rootCA.pem
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain \
+  ~/.config/opencode/certs/nuc-mkcert-rootCA.pem
+```
+
+The OpenCode background service needs both the adapter key and the CA path in
+its own environment. Do not print or commit the key:
+
+```bash
+opencode service set env NUC_LLM_API_KEY "$NUC_LLM_API_KEY"
+opencode service set env NODE_EXTRA_CA_CERTS \
+  "$HOME/.config/opencode/certs/nuc-mkcert-rootCA.pem"
+opencode service restart
+```
+
+Configure the custom provider with `https://nuc.fritz.box/v1`, the
+`aisdk:@ai-sdk/openai-compatible` package, and a 32K context limit. Keep one
+active OpenCode session at a time because the NUC model server exposes one
+inference slot.
+
 ## Start the Stack
 
 ```bash
 cd /home/tupolev/llm-stack
-docker compose up -d
+docker compose up -d --wait
 ```
 
 Main services:
@@ -260,9 +287,9 @@ Main services:
 - `adapter`
 - `open-webui`
 - `caddy`
+- `llama-server`
 - `prometheus`
 - `grafana`
-- `ollama-exporter`
 - `node-exporter`
 
 ## Day-to-Day Operations
@@ -308,10 +335,10 @@ Check main stack service:
 systemctl status llm-stack
 ```
 
-Check warmup service:
+Check model readiness:
 
 ```bash
-systemctl status ollama-warmup
+docker compose ps llama-server
 ```
 
 Restart the stack:
@@ -324,71 +351,35 @@ View logs:
 
 ```bash
 journalctl -u llm-stack -f
-journalctl -u ollama-warmup -f
+docker compose logs -f llama-server
 ```
 
-## Ollama Tuning
+## llama.cpp Runtime
 
-Ollama performance tuning is now versioned in the repository instead of being maintained only as a manual host edit.
+The model server is the `llama-server` Compose service. It uses the official
+Vulkan image and downloads `ggml-org/Qwen3-8B-GGUF:Q8_0` with the alias
+`qwen3:8b`. Hugging Face data is stored in the managed Docker volume
+`hf-cache`.
 
-Versioned files:
+The server runs one slot with a 32K context window (`--parallel 1` and
+`--ctx-size 32768`). This leaves enough room for OpenCode's system prompt and
+tool definitions without immediately compacting a new session.
 
-- [`llm-stack/ollama/systemd/override.conf`](/home/tupolev/llm-stack/ollama/systemd/override.conf)
-- [`llm-stack/ollama/install-ollama-tuning.sh`](/home/tupolev/llm-stack/ollama/install-ollama-tuning.sh)
+The adapter reaches it over the private Compose network at
+`http://llama-server:8080/v1`; clients continue to use the adapter at
+`https://nuc.fritz.box/v1`.
 
-The installer applies this as a systemd drop-in at:
-
-```text
-/etc/systemd/system/ollama.service.d/override.conf
-```
-
-This step is run automatically by the main installer after Ollama has been verified.
-
-To apply it manually:
+Start and inspect it manually:
 
 ```bash
-./llm-stack/ollama/install-ollama-tuning.sh
+cd /home/tupolev/llm-stack
+docker compose up -d --wait llama-server
+docker compose logs -f llama-server
 ```
 
-To verify the applied environment:
-
-```bash
-systemctl show ollama --property=Environment
-```
-
-To inspect Ollama logs:
-
-```bash
-journalctl -u ollama -b --no-pager
-```
-
-Current tuning:
-
-- `OLLAMA_HOST=0.0.0.0:11434`
-  Makes the host Ollama API reachable from the Dockerized adapter via `host.docker.internal`.
-- `OLLAMA_KEEP_ALIVE=30m`
-  Keeps the model loaded for 30 minutes after the last request.
-- `OLLAMA_MAX_LOADED_MODELS=1`
-  Prevents several large models from being loaded at the same time.
-- `OLLAMA_NUM_PARALLEL=1`
-  Keeps Ollama internal parallelism conservative because the FastAPI adapter already handles scheduling.
-- `OLLAMA_MAX_QUEUE=20`
-  Limits Ollama's internal request queue.
-- `OLLAMA_FLASH_ATTENTION=1`
-  Enables Flash Attention to reduce memory usage for larger contexts.
-- `OLLAMA_KV_CACHE_TYPE=q8_0`
-  Uses 8-bit K/V cache to reduce memory usage with minimal expected quality impact.
-
-Warmup wrapper path:
-
-```text
-/usr/local/bin/warm-ollama-wrapper.sh
-```
-
-Warmup behavior:
-
-1. waits for Ollama readiness
-2. executes `/opt/llm-stack/warm-ollama.sh`
+The versioned system service is
+[`llm-stack/systemd/llm-stack.service`](/home/tupolev/llm-stack/systemd/llm-stack.service).
+It starts Compose with `--wait`, so there is no separate model warmup service.
 
 ## API Keys
 
@@ -453,24 +444,8 @@ curl http://localhost:4000/v1/models \
   -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
-Current configured/tested model names in this stack:
-
-Tool-capable models for agentic clients such as OpenCode:
-
-- `qwen2.5-coder:14b`
-- `qwen2.5-coder:7b`
-- `qwen3-coder`
-- `llama3-groq-tool-use:8b`
-- `llama3.1:8b`
-
-Chat-only model in the current Ollama setup:
-
-- `deepseek-coder-v2:16b`
-
-Notes:
-
-- `deepseek-coder-v2:16b` answers normal `/api/chat` requests, but Ollama rejects tool-enabled `/api/chat` requests for this model with `400 Bad Request` and `does not support tools`
-- for OpenCode or any other client that must use `bash`, `read`, `write`, `edit`, or similar request-scoped tools, prefer one of the tool-capable models above
+The currently served model is `qwen3:8b` (`ggml-org/Qwen3-8B-GGUF:Q8_0`).
+Use the alias returned by `/v1/models` in every client configuration.
 
 Simple chat:
 
@@ -479,7 +454,7 @@ curl http://localhost:4000/v1/chat/completions \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen2.5-coder:14b",
+    "model": "qwen3:8b",
     "messages": [
       {"role":"user","content":"Hello"}
     ]
@@ -512,7 +487,7 @@ curl -N http://localhost:4000/v1/chat/completions \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "llama3.1:8b",
+    "model": "qwen3:8b",
     "stream": true,
     "messages": [
       {"role":"user","content":"Describe this server in one sentence."}
@@ -569,9 +544,8 @@ Example:
 BASE_URL="https://nuc.fritz.box" API_KEY="YOUR_API_KEY" bash /home/tupolev/e2e.sh -vv
 ```
 
-Current status:
-
-- `56/56` checks passing
+Run the validation after changing the adapter, model server, or client
+configuration.
 
 ## Current Features
 
@@ -644,7 +618,7 @@ PHP-oriented command support is also available through `exec_command`, including
 
 - no per-key rate limiting
 - no anti-starvation mechanism
-- single-node Ollama
+- one llama.cpp model server and one active inference slot
 - not designed as a hardened public internet service
 
 ## Quick Troubleshooting

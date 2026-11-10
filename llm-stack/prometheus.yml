@@ -8,9 +8,9 @@ scrape_configs:
     static_configs:
       - targets: ["adapter:4000"]
 
-  - job_name: ollama
+  - job_name: llama-server
     static_configs:
-      - targets: ["ollama-exporter:9101"]
+      - targets: ["llama-server:8080"]
 
   - job_name: node
     static_configs:

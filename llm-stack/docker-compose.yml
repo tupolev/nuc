@@ -43,6 +43,33 @@ services:
     ports:
       - "4000:4000"
 
+  llama-server:
+    image: ghcr.io/ggml-org/llama.cpp:server-vulkan
+    restart: unless-stopped
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ./models:/models:ro
+      - hf-cache:/root/.cache/huggingface
+    command:
+      - --hf-repo
+      - ggml-org/Qwen3-8B-GGUF:Q8_0
+      - --alias
+      - qwen3:8b
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --jinja
+      - --ctx-size
+      - "32768"
+      - --n-gpu-layers
+      - "999"
+      - --parallel
+      - "1"
+      - --n-predict
+      - "1024"
+
   prometheus:
     image: prom/prometheus
     restart: always
@@ -66,12 +93,6 @@ services:
     volumes:
       - '/:/host:ro,rslave'
 
-  ollama-exporter:
-    build: ./ollama-exporter
-    restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
   grafana:
     image: grafana/grafana:latest
     restart: unless-stopped
@@ -82,3 +103,4 @@ services:
 
 volumes:
   open-webui-data:
+  hf-cache:

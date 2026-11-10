@@ -11,8 +11,8 @@ from config import (
     AUTO_ENABLE_LOCAL_TOOLS,
     ENABLE_PSEUDO_TOOL_EXTRACTION,
     FILTER_TOOLS_FOR_LOCAL_MODELS,
-    OLLAMA_CHAT_TIMEOUT_SECONDS,
-    OLLAMA_URL,
+    LLM_BASE_URL,
+    LLM_CHAT_TIMEOUT_SECONDS,
     TOOL_EXECUTION_MODE,
     TOOL_MAX_ITERATIONS,
 )
@@ -324,8 +324,8 @@ def normalize_openai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, 
     return normalized
 
 
-def to_ollama_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    ollama_messages: List[Dict[str, Any]] = []
+def to_openai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    openai_messages: List[Dict[str, Any]] = []
 
     for message in messages:
         role = message.get("role")
@@ -335,46 +335,33 @@ def to_ollama_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         }
 
         if role == "assistant" and message.get("tool_calls"):
-            native_tool_calls = []
-            for tool_call in message["tool_calls"]:
-                if not isinstance(tool_call, dict):
-                    continue
-                fn = tool_call.get("function") or {}
-                args = fn.get("arguments", {})
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except Exception:
-                        pass
-                native_tool_calls.append(
-                    {
-                        "function": {
-                            "name": fn.get("name", ""),
-                            "arguments": args,
-                        }
-                    }
-                )
-            if native_tool_calls:
-                item["tool_calls"] = native_tool_calls
+            # llama-server exposes the OpenAI chat-completions contract, so keep
+            # tool-call IDs, types, and JSON-encoded arguments unchanged.
+            item["tool_calls"] = message["tool_calls"]
         elif role == "assistant" and isinstance(message.get("function_call"), dict):
             fn = message.get("function_call") or {}
             args = fn.get("arguments", {})
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except Exception:
-                    pass
-            item["tool_calls"] = [{"function": {"name": fn.get("name", ""), "arguments": args}}]
+            if not isinstance(args, str):
+                args = json.dumps(args, ensure_ascii=False)
+            item["tool_calls"] = [
+                {
+                    "id": f"call_{uuid.uuid4().hex}",
+                    "type": "function",
+                    "function": {"name": fn.get("name", ""), "arguments": args},
+                }
+            ]
 
         if role == "tool":
+            if message.get("tool_call_id"):
+                item["tool_call_id"] = message["tool_call_id"]
             if message.get("tool_name"):
                 item["name"] = message["tool_name"]
             elif message.get("name"):
                 item["name"] = message["name"]
 
-        ollama_messages.append(item)
+        openai_messages.append(item)
 
-    return ollama_messages
+    return openai_messages
 
 
 def make_openai_tool_call(raw_tool_call: Dict[str, Any]) -> Dict[str, Any]:
@@ -857,6 +844,12 @@ def normalize_tool_arguments(name: str, arguments: Any) -> Any:
     elif name == "bash":
         if "command" not in normalized and "cmd" in normalized:
             normalized["command"] = normalized["cmd"]
+        if "command" not in normalized and "commands" in normalized:
+            normalized["command"] = normalized["commands"]
+        if isinstance(normalized.get("command"), list):
+            normalized["command"] = " && ".join(str(item) for item in normalized["command"])
+        normalized.pop("cmd", None)
+        normalized.pop("commands", None)
     elif name == "todowrite":
         if "todos" not in normalized:
             for key in ("items", "entries", "tasks"):
@@ -1372,32 +1365,32 @@ async def run_chat_with_native_tools(
     messages: List[Dict[str, Any]],
     tools: List[Dict[str, Any]],
     tool_choice: Optional[Dict[str, Any]] = None,
-    ollama_tool_choice: Any = None,
+    backend_tool_choice: Any = None,
     execution_mode: str = "server",
     max_iterations: int = TOOL_MAX_ITERATIONS,
     behavior_flags: Optional[Dict[str, Any]] = None,
     request_id: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], int, str]:
-    async with httpx.AsyncClient(timeout=float(OLLAMA_CHAT_TIMEOUT_SECONDS)) as client:
-        tools_for_ollama = filter_tools_for_local_models(tools, behavior_flags)
-        history = inject_tool_use_system_prompt(messages, tools_for_ollama, behavior_flags)
+    async with httpx.AsyncClient(timeout=float(LLM_CHAT_TIMEOUT_SECONDS)) as client:
+        backend_tools = filter_tools_for_local_models(tools, behavior_flags)
+        history = inject_tool_use_system_prompt(messages, backend_tools, behavior_flags)
         parsed_choice = tool_choice or {"mode": "auto", "forced_name": None}
 
         logger.info(
             "system_tool_prompt_injected=%s",
-            bool(tools_for_ollama) and is_behavior_enabled(behavior_flags, "enable_tool_prompt"),
+            bool(backend_tools) and is_behavior_enabled(behavior_flags, "enable_tool_prompt"),
         )
 
         if parsed_choice.get("mode") == "none":
             response = await client.post(
-                f"{OLLAMA_URL}/api/chat",
-                json={"model": model, "messages": to_ollama_messages(history), "stream": False},
+                f"{LLM_BASE_URL}/chat/completions",
+                json={"model": model, "messages": to_openai_messages(history), "stream": False},
             )
             response.raise_for_status()
             data = response.json()
             final_message = {
                 "role": "assistant",
-                "content": data.get("message", {}).get("content", "") or "",
+                "content": ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "") or "",
             }
             METRICS["tool_loop_iterations"].append(0)
             return final_message, history, 1, "stop"
@@ -1408,22 +1401,22 @@ async def run_chat_with_native_tools(
         for iteration in range(1, max_iterations + 1):
             payload: Dict[str, Any] = {
                 "model": model,
-                "messages": to_ollama_messages(history),
+                "messages": to_openai_messages(history),
                 "stream": False,
             }
 
-            if tools_for_ollama:
-                payload["tools"] = tools_for_ollama
-                if ollama_tool_choice is not None:
-                    payload["tool_choice"] = ollama_tool_choice
+            if backend_tools:
+                payload["tools"] = backend_tools
+                if backend_tool_choice is not None:
+                    payload["tool_choice"] = backend_tool_choice
 
-            response = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+            response = await client.post(f"{LLM_BASE_URL}/chat/completions", json=payload)
             response.raise_for_status()
             data = response.json()
 
-            raw_message = data.get("message", {}) or {}
+            raw_message = ((data.get("choices") or [{}])[0].get("message") or {})
             logger.info(
-                "ollama_response execution_mode=%s native_tool_calls=%s has_function_call=%s content_preview=%r",
+                "llama_server_response execution_mode=%s native_tool_calls=%s has_function_call=%s content_preview=%r",
                 execution_mode,
                 bool(raw_message.get("tool_calls")),
                 isinstance(raw_message.get("function_call"), dict),

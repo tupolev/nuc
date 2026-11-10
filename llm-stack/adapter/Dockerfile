@@ -9,6 +9,7 @@ RUN apt-get update \
         ca-certificates \
         composer \
         git \
+        libatomic1 \
         nginx \
         nodejs \
         npm \

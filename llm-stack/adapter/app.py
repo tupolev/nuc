@@ -22,7 +22,7 @@ from config import (
     ENABLE_PSEUDO_TOOL_EXTRACTION,
     FILTER_TOOLS_FOR_LOCAL_MODELS,
     FORCE_TOOL_CHOICE,
-    OLLAMA_URL,
+    LLM_BASE_URL,
     QUEUE_TIMEOUT,
     TOOL_EXECUTION_MODE,
 )
@@ -36,7 +36,7 @@ from openai_compat import (
     normalize_tool_choice,
     run_chat_with_native_tools,
     stream_tool_call_chunks,
-    to_ollama_messages,
+    to_openai_messages,
 )
 from tooling import TOOL_REGISTRY, build_all_tool_specs, execute_tool_call
 
@@ -393,7 +393,7 @@ async def chat(request: Request, req: dict):
                     messages=messages,
                     tools=tools,
                     tool_choice=tool_choice,
-                    ollama_tool_choice=effective_tool_choice,
+                    backend_tool_choice=effective_tool_choice,
                     execution_mode=execution_mode,
                     behavior_flags=behavior_flags,
                     request_id=request_id,
@@ -404,8 +404,8 @@ async def chat(request: Request, req: dict):
                 return JSONResponse(status_code=500, content={"error": str(exc)})
             except httpx.HTTPError as exc:
                 state.METRICS["errors"] += 1
-                state.close_session(request_id, error=f"ollama error: {exc}")
-                return JSONResponse(status_code=502, content={"error": f"ollama error: {exc}"})
+                state.close_session(request_id, error=f"llama.cpp error: {exc}")
+                return JSONResponse(status_code=502, content={"error": f"llama.cpp error: {exc}"})
 
             state.close_session(request_id, final_result=final_message)
 
@@ -483,10 +483,10 @@ async def chat(request: Request, req: dict):
         if not stream:
             async with httpx.AsyncClient(timeout=180.0) as client:
                 response = await client.post(
-                    f"{OLLAMA_URL}/api/chat",
+                    f"{LLM_BASE_URL}/chat/completions",
                     json={
                         "model": model,
-                        "messages": to_ollama_messages(messages),
+                        "messages": to_openai_messages(messages),
                         "stream": False,
                     },
                 )
@@ -494,7 +494,7 @@ async def chat(request: Request, req: dict):
                 data = response.json()
                 final_message = {
                     "role": "assistant",
-                    "content": data.get("message", {}).get("content", "") or "",
+                    "content": ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "") or "",
                 }
                 return JSONResponse(
                     build_chat_completion_response(
@@ -508,10 +508,10 @@ async def chat(request: Request, req: dict):
             async with httpx.AsyncClient(timeout=None) as client:
                 async with client.stream(
                     "POST",
-                    f"{OLLAMA_URL}/api/chat",
+                    f"{LLM_BASE_URL}/chat/completions",
                     json={
                         "model": model,
-                        "messages": to_ollama_messages(messages),
+                        "messages": to_openai_messages(messages),
                         "stream": True,
                     },
                 ) as response:
@@ -524,20 +524,23 @@ async def chat(request: Request, req: dict):
                         if not line:
                             continue
 
+                        if not line.startswith("data: "):
+                            continue
+                        if line == "data: [DONE]":
+                            yield make_stream_chunk(finish_reason="stop")
+                            yield "data: [DONE]\n\n"
+                            break
+
                         try:
-                            data = json.loads(line)
+                            data = json.loads(line[6:])
                         except Exception:
                             continue
 
-                        token = data.get("message", {}).get("content")
+                        token = ((data.get("choices") or [{}])[0].get("delta") or {}).get("content")
                         if token:
                             state.METRICS["tokens_streamed"] += 1
                             yield make_stream_chunk(content=token)
 
-                        if data.get("done"):
-                            yield make_stream_chunk(finish_reason="stop")
-                            yield "data: [DONE]\n\n"
-                            break
 
         return StreamingResponse(
             generator(),
@@ -565,12 +568,12 @@ async def embeddings(request: Request, req: dict):
 
     try:
         async with httpx.AsyncClient(timeout=180.0) as client:
-            response = await client.post(f"{OLLAMA_URL}/api/embeddings", json=req)
+            response = await client.post(f"{LLM_BASE_URL}/embeddings", json=req)
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as exc:
         state.METRICS["errors"] += 1
-        return JSONResponse(status_code=502, content={"error": f"ollama error: {exc}"})
+        return JSONResponse(status_code=502, content={"error": f"llama.cpp error: {exc}"})
     finally:
         state.embed_active = max(state.embed_active - 1, 0)
         state.METRICS["embed_active"] = state.embed_active
@@ -580,25 +583,13 @@ async def embeddings(request: Request, req: dict):
 async def models():
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.get(f"{OLLAMA_URL}/api/tags")
+            response = await client.get(f"{LLM_BASE_URL}/models")
             response.raise_for_status()
     except httpx.HTTPError as exc:
         state.METRICS["errors"] += 1
-        return JSONResponse(status_code=502, content={"error": f"ollama error: {exc}"})
+        return JSONResponse(status_code=502, content={"error": f"llama.cpp error: {exc}"})
 
-    models_data = response.json().get("models", [])
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": model_info["name"],
-                "object": "model",
-                "created": 0,
-                "owned_by": "ollama",
-            }
-            for model_info in models_data
-        ],
-    }
+    return response.json()
 
 
 @app.get("/v1/tools")

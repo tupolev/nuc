@@ -3,7 +3,7 @@
 End-to-end style integration test for section 16 verification:
 "Ejecutar una tool remota desde una sesion del agente."
 
-This test does NOT require Ollama or any external service.
+This test does NOT require a model server or any external service.
 It validates the complete flow:
   state.create_session() -> execute_tool_call() -> append_tool_call() -> close_session()
 

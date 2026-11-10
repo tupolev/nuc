@@ -1,7 +1,7 @@
 import os
 
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://llama-server:8080/v1").rstrip("/")
 FILES_DIR = os.getenv("FILES_DIR", "/data/files")
 AUTH_DB_PATH = os.getenv("AUTH_DB_PATH", "/data/auth.db")
 WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "/workspace")
@@ -20,7 +20,7 @@ PYTHON_TIMEOUT = int(os.getenv("PYTHON_TIMEOUT", "30"))
 PYTHON_CODE_MAX_LEN = int(os.getenv("PYTHON_CODE_MAX_LEN", "12000"))
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "30"))
 HTTP_MAX_BYTES = int(os.getenv("HTTP_MAX_BYTES", "300000"))
-OLLAMA_CHAT_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_CHAT_TIMEOUT_SECONDS", "600"))
+LLM_CHAT_TIMEOUT_SECONDS = int(os.getenv("LLM_CHAT_TIMEOUT_SECONDS", "600"))
 SQLITE_QUERY_MAX_ROWS = int(os.getenv("SQLITE_QUERY_MAX_ROWS", "200"))
 SHELL_TIMEOUT = int(os.getenv("SHELL_TIMEOUT", "20"))
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen2.5-coder:7b")

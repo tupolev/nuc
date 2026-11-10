@@ -30,16 +30,11 @@ apt install -y \
     sudo
 
 # =========================
-# 3. Verify Ollama
+# 3. Verify systemd
 # =========================
-echo "🦙 Verifying Ollama..."
+echo "⚙️ Verifying systemd..."
 if ! command -v systemctl &> /dev/null; then
     echo "❌ systemctl is required, but was not found." >&2
-    exit 1
-fi
-
-if ! systemctl cat ollama.service >/dev/null 2>&1; then
-    echo "❌ Ollama is not installed or ollama.service is unavailable. Install Ollama before running this installer." >&2
     exit 1
 fi
 
@@ -96,20 +91,13 @@ CREATE TABLE IF NOT EXISTS api_keys (
 EOF
 
 # =========================
-# 7. Install Ollama tuning
-# =========================
-echo "⚙️ Applying Ollama tuning..."
-chmod +x "${STACK_DIR}/ollama/install-ollama-tuning.sh"
-"${STACK_DIR}/ollama/install-ollama-tuning.sh"
-
-# =========================
-# 8. Build + start stack
+# 7. Build + start stack
 # =========================
 echo "🐳 Starting Docker stack..."
-docker compose up -d --build
+docker compose up -d --build --wait --remove-orphans
 
 # =========================
-# 9. Create systemd service (stack)
+# 8. Create systemd service (stack)
 # =========================
 echo "⚙️ Creating systemd service..."
 
@@ -120,10 +108,11 @@ After=docker.service
 Requires=docker.service
 
 [Service]
+Type=oneshot
+RemainAfterExit=yes
 WorkingDirectory=$STACK_DIR
-ExecStart=/usr/bin/docker compose up -d
+ExecStart=/usr/bin/docker compose up -d --wait --remove-orphans
 ExecStop=/usr/bin/docker compose down
-Restart=always
 TimeoutStartSec=0
 
 [Install]
@@ -131,61 +120,7 @@ WantedBy=multi-user.target
 EOF
 
 # =========================
-# 10. Warmup script wrapper
-# =========================
-echo "🔥 Setting up Ollama warmup..."
-
-cat <<'EOF' > /usr/local/bin/warm-ollama-wrapper.sh
-#!/usr/bin/env bash
-
-set -euo pipefail
-
-MODELS=(
-  "qwen2.5-coder:14b"
-  "qwen2.5-coder:7b"
-  "llama3-groq-tool-use:8b"
-  "llama3.1:8b"
-  "qwen3-coder"
-  "deepseek-coder-v2:16b"
-)
-
-echo "Waiting for Ollama..."
-
-until curl -s http://localhost:11434/api/tags > /dev/null; do
-  sleep 2
-done
-
-echo "Ollama ready. Warming up..."
-
-for model in "${MODELS[@]}"; do
-  bash /opt/llm-stack/warm-ollama.sh "$model"
-done
-
-curl http://localhost:11434/api/embeddings \
-  -d '{"model":"all-minilm","prompt":"warmup"}'
-EOF
-
-chmod +x /usr/local/bin/warm-ollama-wrapper.sh
-
-# =========================
-# 11. Warmup systemd service
-# =========================
-cat <<EOF > /etc/systemd/system/ollama-warmup.service
-[Unit]
-Description=Warm up Ollama models
-After=llm-stack.service
-Requires=llm-stack.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/warm-ollama-wrapper.sh
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# =========================
-# 12. Enable services
+# 9. Enable services
 # =========================
 echo "🔁 Enabling services..."
 
@@ -193,10 +128,8 @@ systemctl daemon-reexec
 systemctl daemon-reload
 
 systemctl enable llm-stack
-systemctl enable ollama-warmup
 
 systemctl start llm-stack
-systemctl start ollama-warmup
 
 # =========================
 # DONE

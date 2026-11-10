@@ -10,6 +10,9 @@
 /.docker/
 /.vscode-server/
 /.copilot/
+/llm-stack/models/
+/models/
+/llm-stack/hf-cache/
 .*$
 .bash_history
 .bash_logout
