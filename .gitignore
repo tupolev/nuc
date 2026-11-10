@@ -13,6 +13,7 @@
 /llm-stack/models/
 /models/
 /llm-stack/hf-cache/
+/llm-stack/outputs/
 .*$
 .bash_history
 .bash_logout

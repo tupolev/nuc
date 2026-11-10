@@ -2,6 +2,10 @@ import os
 
 
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://llama-server:8080/v1").rstrip("/")
+VISION_BASE_URL = os.getenv("VISION_BASE_URL", "http://vision-server:8081/v1").rstrip("/")
+VISION_MODEL = os.getenv("VISION_MODEL", "qwen2.5-vl:3b")
+IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "http://image-server:7860").rstrip("/")
+SPEACHES_BASE_URL = os.getenv("SPEACHES_BASE_URL", "http://speaches:8000/v1").rstrip("/")
 FILES_DIR = os.getenv("FILES_DIR", "/data/files")
 AUTH_DB_PATH = os.getenv("AUTH_DB_PATH", "/data/auth.db")
 WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "/workspace")

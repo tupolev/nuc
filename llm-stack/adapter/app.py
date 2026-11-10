@@ -22,9 +22,13 @@ from config import (
     ENABLE_PSEUDO_TOOL_EXTRACTION,
     FILTER_TOOLS_FOR_LOCAL_MODELS,
     FORCE_TOOL_CHOICE,
+    IMAGE_BASE_URL,
     LLM_BASE_URL,
     QUEUE_TIMEOUT,
+    SPEACHES_BASE_URL,
     TOOL_EXECUTION_MODE,
+    VISION_BASE_URL,
+    VISION_MODEL,
 )
 from openai_compat import (
     build_chat_completion_response,
@@ -163,6 +167,39 @@ def get_agent_behavior_flags(agent_profile: str) -> dict:
     }
 
 
+async def proxy_api_request(request: Request, base_url: str, path: str, timeout: float = 600.0):
+    """Forward an authenticated API request without passing the client API key on."""
+    headers = {}
+    for header_name in ("accept", "content-type"):
+        value = request.headers.get(header_name)
+        if value:
+            headers[header_name] = value
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.request(
+                request.method,
+                f"{base_url}{path}",
+                params=request.query_params,
+                content=await request.body(),
+                headers=headers,
+            )
+    except httpx.HTTPError as exc:
+        state.METRICS["errors"] += 1
+        return JSONResponse(status_code=502, content={"error": f"upstream service error: {exc}"})
+
+    response_headers = {}
+    for header_name in ("content-type", "content-disposition"):
+        value = response.headers.get(header_name)
+        if value:
+            response_headers[header_name] = value
+    return Response(
+        content=response.content,
+        status_code=response.status_code,
+        headers=response_headers,
+    )
+
+
 @app.middleware("http")
 async def auth(request: Request, call_next):
     if request.url.path.startswith("/v1"):
@@ -294,6 +331,9 @@ llm_tool_latency_p95 {state.percentile(state.METRICS["tool_latency"], 95)}
 
 @app.post("/v1/chat/completions")
 async def chat(request: Request, req: dict):
+    if req.get("model") == VISION_MODEL:
+        return await proxy_api_request(request, VISION_BASE_URL, "/chat/completions")
+
     state.METRICS["requests_total"] += 1
 
     api_key = request.state.api_key
@@ -589,7 +629,36 @@ async def models():
         state.METRICS["errors"] += 1
         return JSONResponse(status_code=502, content={"error": f"llama.cpp error: {exc}"})
 
-    return response.json()
+    data = response.json()
+    models = data.get("data") if isinstance(data, dict) else None
+    if isinstance(models, list) and not any(item.get("id") == VISION_MODEL for item in models if isinstance(item, dict)):
+        models.append({"id": VISION_MODEL, "object": "model", "owned_by": "local"})
+    return data
+
+
+@app.post("/v1/images/generations")
+async def image_generations(request: Request):
+    return await proxy_api_request(request, IMAGE_BASE_URL, "/v1/images/generations", timeout=900.0)
+
+
+@app.post("/v1/images/edits")
+async def image_edits(request: Request):
+    return await proxy_api_request(request, IMAGE_BASE_URL, "/v1/images/edits", timeout=900.0)
+
+
+@app.post("/v1/audio/transcriptions")
+async def audio_transcriptions(request: Request):
+    return await proxy_api_request(request, SPEACHES_BASE_URL, "/audio/transcriptions")
+
+
+@app.post("/v1/audio/translations")
+async def audio_translations(request: Request):
+    return await proxy_api_request(request, SPEACHES_BASE_URL, "/audio/translations")
+
+
+@app.post("/v1/audio/speech")
+async def audio_speech(request: Request):
+    return await proxy_api_request(request, SPEACHES_BASE_URL, "/audio/speech")
 
 
 @app.get("/v1/tools")

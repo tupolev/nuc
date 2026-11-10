@@ -70,6 +70,63 @@ services:
       - --n-predict
       - "1024"
 
+  vision-server:
+    image: ghcr.io/ggml-org/llama.cpp:server-vulkan
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 10m
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    command:
+      - --hf-repo
+      - ggml-org/Qwen2.5-VL-3B-Instruct-GGUF:Q4_K_M
+      - --alias
+      - qwen2.5-vl:3b
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8081"
+      - --jinja
+      - --ctx-size
+      - "8192"
+      - --image-min-tokens
+      - "1024"
+      - --n-gpu-layers
+      - "999"
+      - --parallel
+      - "1"
+      - --n-predict
+      - "1024"
+
+  image-server:
+    build: ./stable-diffusion
+    restart: unless-stopped
+    init: true
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ./models/stable-diffusion:/models:ro
+      - ./outputs:/output
+    command:
+      - --model
+      - /models/v1-5-pruned_Q4_K.gguf
+      - --listen-ip
+      - 0.0.0.0
+      - --listen-port
+      - "7860"
+
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    restart: unless-stopped
+    volumes:
+      - speaches-cache:/home/ubuntu/.cache/huggingface
+
   prometheus:
     image: prom/prometheus
     restart: always
@@ -104,3 +161,4 @@ services:
 volumes:
   open-webui-data:
   hf-cache:
+  speaches-cache:
