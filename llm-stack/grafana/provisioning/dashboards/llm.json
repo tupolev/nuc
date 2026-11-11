@@ -1,35 +1,24 @@
 {
-  "title": "LLM Metrics",
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 0,
   "panels": [
-    {
-      "type": "graph",
-      "title": "Generation tokens / second",
-      "targets": [
-        { "expr": "rate(llamacpp:tokens_predicted_total[30s])", "legendFormat": "output tok/s" }
-      ]
-    },
-    {
-      "type": "graph",
-      "title": "Generation tokens total",
-      "targets": [
-        { "expr": "llamacpp:tokens_predicted_total", "legendFormat": "output tokens" }
-      ]
-    },
-    {
-      "type": "graph",
-      "title": "Active llama.cpp requests",
-      "targets": [
-        { "expr": "llamacpp:requests_processing", "legendFormat": "processing" },
-        { "expr": "llamacpp:requests_deferred", "legendFormat": "queued" }
-      ]
-    },
-    {
-      "type": "graph",
-      "title": "Model throughput",
-      "targets": [
-        { "expr": "llamacpp:predicted_tokens_seconds", "legendFormat": "generation tok/s" },
-        { "expr": "llamacpp:prompt_tokens_seconds", "legendFormat": "prompt tok/s" }
-      ]
-    }
-  ]
+    {"datasource": null, "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}, "gridPos": {"h": 5, "w": 4, "x": 0, "y": 0}, "id": 1, "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}, "targets": [{"expr": "sum(llamacpp:requests_processing)", "refId": "A"}], "title": "Active requests", "type": "stat"},
+    {"datasource": null, "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}, "gridPos": {"h": 5, "w": 4, "x": 4, "y": 0}, "id": 2, "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}, "targets": [{"expr": "sum(llamacpp:requests_deferred)", "refId": "A"}], "title": "Queued requests", "type": "stat"},
+    {"datasource": null, "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}, "gridPos": {"h": 5, "w": 4, "x": 8, "y": 0}, "id": 3, "options": {"colorMode": "value", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}, "targets": [{"expr": "sum(llm_requests_total)", "refId": "A"}], "title": "Adapter requests total", "type": "stat"},
+    {"datasource": null, "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []}, "gridPos": {"h": 5, "w": 4, "x": 12, "y": 0}, "id": 4, "options": {"colorMode": "value", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}, "targets": [{"expr": "sum(llm_errors_total)", "refId": "A"}], "title": "Adapter errors total", "type": "stat"},
+    {"datasource": null, "fieldConfig": {"defaults": {"unit": "tps"}, "overrides": []}, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5}, "id": 5, "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}, "targets": [{"expr": "sum(rate(llamacpp:tokens_predicted_total[1m]))", "legendFormat": "output tokens/s", "refId": "A"}, {"expr": "sum(rate(llamacpp:prompt_tokens_total[1m]))", "legendFormat": "input tokens/s", "refId": "B"}, {"expr": "sum(rate(llamacpp:prompt_tokens_cached_total[1m]))", "legendFormat": "cached input tokens/s", "refId": "C"}], "title": "Input and output token rate", "type": "timeseries"},
+    {"datasource": null, "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5}, "id": 6, "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}, "targets": [{"expr": "sum(llamacpp:tokens_predicted_total)", "legendFormat": "output tokens", "refId": "A"}, {"expr": "sum(llamacpp:prompt_tokens_total) + sum(llamacpp:prompt_tokens_cached_total)", "legendFormat": "input tokens incl. cache", "refId": "B"}], "title": "Input and output tokens total", "type": "timeseries"},
+    {"datasource": null, "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13}, "id": 7, "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}, "targets": [{"expr": "llm_latency_p95", "legendFormat": "adapter p95 latency", "refId": "A"}, {"expr": "llm_wait_p95", "legendFormat": "queue p95 wait", "refId": "B"}], "title": "Adapter latency", "type": "timeseries"},
+    {"datasource": null, "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13}, "id": 8, "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}, "targets": [{"expr": "sum(llamacpp:requests_processing)", "legendFormat": "processing", "refId": "A"}, {"expr": "sum(llamacpp:requests_deferred)", "legendFormat": "queued", "refId": "B"}, {"expr": "sum(llm_chat_active)", "legendFormat": "adapter active", "refId": "C"}], "title": "Request state", "type": "timeseries"}
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["llama.cpp", "prometheus", "llm"],
+  "templating": {"list": []},
+  "time": {"from": "now-15m", "to": "now"},
+  "timezone": "browser",
+  "title": "LLM Runtime",
+  "uid": "llm-runtime",
+  "version": 1
 }

@@ -291,6 +291,10 @@ async def metrics_prom():
 # TYPE llm_requests_total counter
 llm_requests_total {state.METRICS['requests_total']}
 
+# HELP llm_errors_total Total failed adapter requests
+# TYPE llm_errors_total counter
+llm_errors_total {state.METRICS['errors']}
+
 # HELP llm_chat_active Active chat requests
 # TYPE llm_chat_active gauge
 llm_chat_active {state.METRICS['chat_active']}
