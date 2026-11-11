@@ -27,7 +27,7 @@
         }
       },
       "options": {
-        "baseURL": "https://nuc.fritz.box/v1"
+        "baseURL": "{env:OPENCODE_BASE_URL}"
       }
     }
   }

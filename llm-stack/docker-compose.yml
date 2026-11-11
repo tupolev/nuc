@@ -40,6 +40,8 @@ services:
   caddy:
     image: caddy:latest
     restart: always
+    env_file:
+      - .env
     ports:
       - "80:80"
       - "443:443"
@@ -81,6 +83,7 @@ services:
       - --port
       - "8080"
       - --jinja
+      - --metrics
       - --ctx-size
       - "32768"
       - --n-gpu-layers

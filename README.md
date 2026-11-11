@@ -83,7 +83,7 @@ The installer is intended to:
 If you are not using the installer, you need:
 
 - Docker and Docker Compose
-- valid Caddy certificates and config for `nuc.fritz.box`
+- valid Caddy certificates and config for the hostname in `PUBLIC_HOST`
 - a local `.env` file with real values
 
 ## Configuration
@@ -253,7 +253,7 @@ certificate to the Mac and trust it in the system keychain:
 
 ```bash
 mkdir -p ~/.config/opencode/certs
-scp tupolev@nuc.fritz.box:/home/tupolev/.local/share/mkcert/rootCA.pem \
+scp "tupolev@${PUBLIC_HOST}":/home/tupolev/.local/share/mkcert/rootCA.pem \
   ~/.config/opencode/certs/nuc-mkcert-rootCA.pem
 sudo security add-trusted-cert -d -r trustRoot \
   -k /Library/Keychains/System.keychain \
@@ -270,7 +270,7 @@ opencode service set env NODE_EXTRA_CA_CERTS \
 opencode service restart
 ```
 
-Configure the custom provider with `https://nuc.fritz.box/v1`, the
+Configure the custom provider with `$OPENCODE_BASE_URL`, the
 `aisdk:@ai-sdk/openai-compatible` package, and a 32K context limit. Keep one
 active OpenCode session at a time because the NUC model server exposes one
 inference slot.
@@ -367,7 +367,7 @@ tool definitions without immediately compacting a new session.
 
 The adapter reaches it over the private Compose network at
 `http://llama-server:8080/v1`; clients continue to use the adapter at
-`https://nuc.fritz.box/v1`.
+`$OPENCODE_BASE_URL`.
 
 Start and inspect it manually:
 
@@ -430,8 +430,8 @@ python3 adapter/manage_api_keys.py migrate-legacy
 ## Useful Endpoints
 
 - Direct adapter API: `http://localhost:4000`
-- API through Caddy: `https://nuc.fritz.box/v1/...`
-- Open WebUI: `https://nuc.fritz.box/`
+- API through Caddy: `$PUBLIC_BASE_URL/v1/...`
+- Open WebUI: `$PUBLIC_BASE_URL/`
 - Prometheus UI: `http://localhost:9090`
 - Grafana: `http://localhost:3001`
 
@@ -541,7 +541,7 @@ It is meant to run from the client machine where the agent runs, not from the NU
 Example:
 
 ```bash
-BASE_URL="https://nuc.fritz.box" API_KEY="YOUR_API_KEY" bash /home/tupolev/e2e.sh -vv
+BASE_URL="$PUBLIC_BASE_URL" API_KEY="YOUR_API_KEY" bash /home/tupolev/e2e.sh -vv
 ```
 
 Run the validation after changing the adapter, model server, or client

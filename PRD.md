@@ -282,7 +282,7 @@ Current validation coverage:
 
 Current validation status:
 
-- after the modular refactor of the adapter, `e2e.sh` still passes end-to-end against `https://nuc.fritz.box`
+- after the modular refactor of the adapter, `e2e.sh` still passes end-to-end against `$PUBLIC_BASE_URL`
 - last validated result: `Summary: total=18 ok=18 fail=0`
 
 ## Known Limitations

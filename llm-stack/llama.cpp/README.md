@@ -29,7 +29,7 @@ The NUC runs the following local services on the private Docker network:
 | Speech to text | faster-whisper-small | `speaches` | OpenAI-compatible `http://speaches:8000/v1` |
 | Text to speech | Kokoro-82M | `speaches` | OpenAI-compatible `http://speaches:8000/v1` |
 
-All external clients use the existing authenticated endpoint, `https://nuc.fritz.box/v1`, with their NUC API key. The adapter routes requests without exposing service ports directly:
+All external clients use the authenticated endpoint in `$NUC_BASE_URL`, with their API key. The adapter routes requests without exposing service ports directly:
 
 | Capability | Public route |
 | --- | --- |
@@ -57,7 +57,7 @@ root certificate and retain `--cacert`; omit that option once the CA is trusted
 by the operating system.
 
 ```bash
-export NUC_BASE_URL=https://nuc.fritz.box/v1
+export NUC_BASE_URL=https://llm.example.internal/v1
 export NUC_LLM_API_KEY='replace-with-your-key'
 export NUC_CA_CERT="$HOME/.config/opencode/certs/nuc-mkcert-rootCA.pem"
 

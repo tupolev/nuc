@@ -9,7 +9,7 @@ It is written for a human user on the client machine where OpenCode will run.
 At the end of this guide you will be able to:
 
 - install OpenCode
-- connect OpenCode to `https://nuc.fritz.box`
+- connect OpenCode to the URL in `OPENCODE_BASE_URL`
 - use the NUC adapter as an OpenAI-compatible provider
 - ask OpenCode to perform web searches through the adapter tools
 - ask OpenCode to inspect and generate source code in this repository
@@ -18,7 +18,7 @@ At the end of this guide you will be able to:
 
 Before starting, make sure you have:
 
-- network access from your client machine to `https://nuc.fritz.box`
+- network access from your client machine to the URL in `OPENCODE_BASE_URL`
 - a valid API key created for the adapter
 - a local clone of this repository if you want OpenCode to work on the codebase directly
 
@@ -107,7 +107,7 @@ Use this configuration:
       "npm": "@ai-sdk/openai-compatible",
       "name": "NUC Local LLM Stack",
       "options": {
-        "baseURL": "https://nuc.fritz.box/v1",
+        "baseURL": "{env:OPENCODE_BASE_URL}",
         "apiKey": "{env:NUC_API_KEY}"
       },
       "models": {
@@ -127,7 +127,7 @@ Use this configuration:
 What this does:
 
 - defines a custom provider named `nuc`
-- tells OpenCode to use the OpenAI-compatible adapter running at `https://nuc.fritz.box/v1`
+- tells OpenCode to use the OpenAI-compatible adapter from `OPENCODE_BASE_URL`
 - reads the API key from the local environment variable `NUC_API_KEY`
 - sets the main model to `qwen2.5-coder:7b`
 - loads [`PRD.md`](/home/tupolev/PRD.md) as project instructions/context
@@ -138,6 +138,7 @@ In the same shell where you will run OpenCode:
 
 ```bash
 export NUC_API_KEY='YOUR_REAL_API_KEY'
+export OPENCODE_BASE_URL='https://llm.example.internal/v1'
 ```
 
 If you do not want to export it manually every time, add it to your shell profile, password manager flow, or a local secret-loading script.
@@ -255,12 +256,12 @@ Check:
 
 - `NUC_API_KEY` is set in the current shell
 - the key is valid in the NUC adapter
-- the adapter is reachable at `https://nuc.fritz.box/v1`
+- `OPENCODE_BASE_URL` is reachable
 
 You can test the API outside OpenCode:
 
 ```bash
-curl -k https://nuc.fritz.box/v1/models \
+curl -k "$OPENCODE_BASE_URL/models" \
   -H "Authorization: Bearer $NUC_API_KEY"
 ```
 
@@ -321,7 +322,7 @@ docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
 6. Validate with:
 
 ```bash
-BASE_URL="https://nuc.fritz.box" API_KEY="$NUC_API_KEY" bash /home/tupolev/e2e.sh -vv
+BASE_URL="${OPENCODE_BASE_URL%/v1}" API_KEY="$NUC_API_KEY" bash /home/tupolev/e2e.sh -vv
 ```
 
 ## Minimal Quick Start

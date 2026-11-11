@@ -1,6 +1,6 @@
-nuc.fritz.box {
+{$PUBLIC_HOST} {
 
-    tls /certs/fullchain.pem /certs/nuc.fritz.box-key.pem
+    tls /certs/{$TLS_CERT_FILE} /certs/{$TLS_KEY_FILE}
 
     handle /v1/* {
         reverse_proxy adapter:4000 {

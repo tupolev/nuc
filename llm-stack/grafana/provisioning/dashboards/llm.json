@@ -3,16 +3,32 @@
   "panels": [
     {
       "type": "graph",
-      "title": "Requests Total",
+      "title": "Generation tokens / second",
       "targets": [
-        { "expr": "llm_requests_total" }
+        { "expr": "rate(llamacpp:tokens_predicted_total[30s])", "legendFormat": "output tok/s" }
       ]
     },
     {
       "type": "graph",
-      "title": "Tokens Streamed",
+      "title": "Generation tokens total",
       "targets": [
-        { "expr": "llm_tokens_streamed_total" }
+        { "expr": "llamacpp:tokens_predicted_total", "legendFormat": "output tokens" }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Active llama.cpp requests",
+      "targets": [
+        { "expr": "llamacpp:requests_processing", "legendFormat": "processing" },
+        { "expr": "llamacpp:requests_deferred", "legendFormat": "queued" }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Model throughput",
+      "targets": [
+        { "expr": "llamacpp:predicted_tokens_seconds", "legendFormat": "generation tok/s" },
+        { "expr": "llamacpp:prompt_tokens_seconds", "legendFormat": "prompt tok/s" }
       ]
     }
   ]
