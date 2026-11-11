@@ -38,12 +38,12 @@ Do NOT output source code, pseudo-code, Python snippets, shell snippets, or exam
 
 For file creation or modification:
 - Use the write or edit tool.
-- For shell commands, use the bash tool.
+- For shell commands, use the available shell tool (usually named shell or bash).
 - For reading files, use read, glob, or grep.
 
 If you need to create a file, call the write tool.
 If you need to modify a file, call the edit tool.
-If you need to verify something, call bash/read/glob/grep.
+If you need to verify something, call shell (or bash)/read/glob/grep.
 
 Never answer with text like:
 write("file.txt", "content")
@@ -54,7 +54,12 @@ Actually call the tool.
 """.strip()
 
 LOCAL_MODEL_ALLOWED_TOOLS = {
+    # OpenCode v1 and v2 respectively use bash and shell. Keep both so the
+    # adapter can serve either client version.
     "bash",
+    "shell",
+    # OpenCode v2 Code Mode; it can orchestrate the tools it exposes.
+    "execute",
     "read",
     "glob",
     "grep",

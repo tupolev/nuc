@@ -7,12 +7,29 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from openai_compat import (
     extract_textual_json_tool_call,
+    filter_tools_for_local_models,
     normalize_local_openai_tools,
     normalize_passthrough_openai_tools,
     normalize_tool_arguments,
     to_openai_messages,
     TOOL_REGISTRY,
 )
+
+
+def test_opencode_v2_shell_and_execute_are_not_filtered():
+    """OpenCode v2 exposes shell/execute, not the v1 bash tool name."""
+    tools = [
+        {"type": "function", "function": {"name": "shell", "parameters": {}}},
+        {"type": "function", "function": {"name": "execute", "parameters": {}}},
+        {"type": "function", "function": {"name": "websearch", "parameters": {}}},
+    ]
+
+    result = filter_tools_for_local_models(
+        tools,
+        {"enable_tool_filtering": True},
+    )
+
+    assert [tool["function"]["name"] for tool in result] == ["shell", "execute"]
 
 
 class TestNormalizeLocalOpenaiTools:

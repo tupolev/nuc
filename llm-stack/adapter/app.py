@@ -80,6 +80,9 @@ OPENCODE_TOOL_MARKERS = {
     "webfetch",
     "todowrite",
     "skill",
+    # OpenCode v2 names these tools differently from the v1 bash/task API.
+    "shell",
+    "execute",
 }
 
 
